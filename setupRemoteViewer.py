@@ -4,7 +4,7 @@ import sys
 
 _script = 'AltAnalyzeViewer.py'
 _appName = "AltAnalyzeViewer"
-_appVersion = '1.0.0.1'
+_appVersion = '1.0.1'
 _appDescription = "AltAnalyze is a freely available, open-source and cross-platform program that allows you to take RNASeq or "
 _appDescription +="relatively raw microarray data (CEL files or normalized), identify predicted alternative splicing or alternative "
 _appDescription +="promoter changes and view how these changes may affect protein sequence, domain composition, and microRNA targeting."
@@ -17,7 +17,7 @@ excludes = ["igraph","patsy","pandas","suds","lxml","cairo","cairo2","ImageTk","
 excludes = ["igraph","patsy","pandas","suds","lxml","cairo","cairo2","mpmath",'virtualenv','Tkinter','matplotlib.tests',"Pillow"]
 #excludes = []
 includes = ["wx"] #["suds", "mpmath", "numpy"]
-includes = ["mpmath", "numpy"]
+includes = ["mpmath", "numpy",'pysam.TabProxies','pysam.ctabixproxies','dbhash','anydbm']
 """ By default, suds will be installed in site-packages as a .egg file (zip compressed). Make a duplicate, change to .zip and extract
 here to allow it to be recognized by py2exe (must be a directory) """
 
@@ -41,7 +41,7 @@ if sys.platform.startswith("darwin"):
         from distutils.core import setup
         import py2app
         #import lxml
-        includes+= ["pkg_resources","distutils","lxml.etree","lxml._elementpath"] #"xml.sax.drivers2.drv_pyexpat"
+        includes+= ["pkg_resources","distutils","lxml.etree","lxml._elementpath",'pysam.TabProxies','pysam.ctabixproxies'] #"xml.sax.drivers2.drv_pyexpat"
         """
         resources = ['/System/Library/Frameworks/Python.framework/Versions/2.6/include/python2.6/pyconfig.h']
         frameworks = ['/System/Library/Frameworks/Python.framework/Versions/2.6/include/python2.6/pyconfig.h']
@@ -97,6 +97,13 @@ if sys.platform.startswith("win"):
         import lxml
         import sys
         import six ### relates to a date-time dependency in matplotlib
+        import pysam
+        import TabProxies
+        import ctabix
+        import csamtools
+        import cvcf
+        import dbhash
+        import anydbm
         #sys.path.append(unique.filepath("Config\DLLs")) ### This is added, but DLLs still require addition to DLL python dir
         from distutils.filelist import findall
         import os

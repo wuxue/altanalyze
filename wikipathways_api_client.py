@@ -1,10 +1,16 @@
 import base64
 import csv
 import getpass
+try:
+    import lxml
+except Exception:
+    print 'library lxml not supported. WikiPathways and LineageProfiler visualization will not work. Please install with pip install lxml.'
 from lxml import etree as ET
 from lxml import _elementpath
 import re
-import requests
+try: import requests
+except Exception:
+    print 'library requests not supported. WikiPathways and LineageProfiler visualization will not work. Please install with pip install requests.'
 import sys
 
 class WikipathwaysApiClient(object):
@@ -248,7 +254,7 @@ class WikipathwaysApiClient(object):
         # create pathway
         update_params = {'auth' : username+'-'+authentication, 'gpml': gpml}
         re = requests.post(self.base_iri + 'createPathway', params=update_params)
-        print re.text
+        #print re.text
 
 
     def get_colored_pathway(self, identifier, element_identifiers, colors, version = '0', file_format = 'svg'):
@@ -510,3 +516,9 @@ class WikipathwaysApiClient(object):
             pathways.append(pathway)
 
         return pathways
+
+if __name__ == '__main__':
+    client = WikipathwaysApiClient()
+    wp_id_data = client.get_pathway_as(file_format = 'gpml',identifier = 'WP254', version = 0)
+    with open('WP205.gpml', 'a') as file_out:
+        file_out.write(wp_id_data)

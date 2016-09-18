@@ -90,22 +90,28 @@ def getArrayHeaders(expr_input_dir):
             x = 1
     return array_names, array_linker_db
 
-def checkExpressionFileFormat(expFile):
+def checkExpressionFileFormat(expFile,reportNegatives=False):
+    """ Determine if the data is log, non-log and increment value for log calculation """
     firstLine=True; convert=False
     inputMax=0; inputMin=10000; increment=0
     expressed_values={}
+    startIndex = 1
     for line in open(expFile,'rU').xreadlines():
         line = cleanUpLine(line)
         key = string.split(line,'\t')[0]
         t = string.split(line,'\t')
         if firstLine:
             headers = line
+            if 'row_clusters-flat' == t[1]:
+                startIndex = 2
             firstLine = False
         else:
+            if 'column_clusters-flat' in t:
+                continue ### skip this row if analyzing a clustered heatmap file
             try: uid, coordinates = string.split(key,'=')
             except Exception: uid = key
             if '' in t[1:]:
-                values = [0 if x=='' else x for x in t[1:]]
+                values = [0 if x=='' else x for x in t[startIndex:]]
             else:
                 values = t[1:]
             try: values = map(lambda x: float(x), values)
@@ -118,13 +124,20 @@ def checkExpressionFileFormat(expFile):
             
     if inputMax>100: ### Thus, not log values
         expressionDataFormat = 'non-log'
-        if inputMin<=1:
+        if inputMin<=1: #if inputMin<=1:
             increment = inputMin+1
         convert = True
     else:
         expressionDataFormat = "log"
     #print expressionDataFormat,increment,convert
-    return expressionDataFormat,increment,convert
+    if reportNegatives == False:
+        return expressionDataFormat,increment,convert
+    else:
+        ### Report if negative values are present
+        increment = inputMin
+        if convert: ### Should rarely be the case, as this would indicate that a non-log folds are present in the file
+            increment = increment+1
+        return expressionDataFormat,increment,convert
 
 def calculate_expression_measures(expr_input_dir,expr_group_dir,experiment_name,comp_group_dir,probeset_db,annotate_db):
     print "Processing the expression file:",expr_input_dir
@@ -144,10 +157,15 @@ def calculate_expression_measures(expr_input_dir,expr_group_dir,experiment_name,
     for line in open(fn1,'rU').xreadlines():             
       data = cleanUpLine(line)
       if data[0] != '#' and data[0] != '!':
-        fold_data = string.split(data,'\t'); arrayid = fold_data[0]
-        if arrayid[0]== ' ':
-            try: arrayid = arrayid[1:] ### Cufflinks issue
-            except Exception: arrayid = ' ' ### can be the first row UID column as blank
+        fold_data = string.split(data,'\t')
+        try: arrayid = fold_data[0]
+        except Exception: arrayid = 'UID'
+        if len(arrayid)>0:
+            if arrayid[0]== ' ':
+                try: arrayid = arrayid[1:] ### Cufflinks issue
+                except Exception: arrayid = ' ' ### can be the first row UID column as blank
+        else:
+            arrayid = 'UID'
         #if 'counts.' in expr_input_dir: arrayid,coordinates = string.split(arrayid,'=') ### needed for exon-level analyses only
         ### differentiate data from column headers
         if x == 1:
@@ -291,7 +309,7 @@ def simplerGroupImport(group_dir):
         data = cleanUpLine(line)
         try: sample_filename,group_number,group_name = string.split(data,'\t')
         except Exception:
-            print string.split(data,'\t')
+            print string.split(data,'\t'), 'more than 3 columns present in groups file'
             kill
         sample_group_db[sample_filename] = group_name
     return sample_group_db
@@ -491,9 +509,9 @@ def exportDataForGenMAPP(headers,input_type):
     genmapp_title = ['GeneID','SystemCode'] + headers
     genmapp_title = string.join(genmapp_title,'\t')+'\t'+'ANOVA-rawp'+'\t'+'ANOVA-adjp'+'\t'+'largest fold'+'\n'
     genmapp.write(genmapp_title)
-
+    
     for probeset in array_folds:
-        if 'ENS' in probeset and (' ' in probeset or '_' in probeset or ':' in probeset or '-' in probeset):
+        if 'ENS' in probeset and (' ' in probeset or '_' in probeset or ':' in probeset or '-' in probeset) and len(probeset)>9:
             system_code = 'En'
             ensembl_gene = 'ENS'+string.split(probeset,'ENS')[1]
             if ' ' in ensembl_gene:
@@ -505,7 +523,7 @@ def exportDataForGenMAPP(headers,input_type):
             if '-' in ensembl_gene:
                 ensembl_gene = string.split(ensembl_gene,'-')[0]
             data_val = ensembl_gene+'\t'+system_code
-        elif ('ENS' in probeset or 'ENF' in probeset) and system_code == 'Sy':
+        elif ('ENS' in probeset or 'ENF' in probeset) and system_code == 'Sy' and len(probeset)>9:
             system_code = 'En'
             data_val = probeset+'\t'+system_code
         else:
@@ -649,7 +667,7 @@ def exportGOEliteInput(headers,system_code):
         goelite_title = string.join(goelite_title,'\t')+'\n'; goelite.write(goelite_title)
         for probeset in denominator_geneids:
             try:
-                if 'ENS' in probeset and (' ' in probeset or '_' in probeset or ':' in probeset or '-' in probeset):
+                if 'ENS' in probeset and (' ' in probeset or '_' in probeset or ':' in probeset or '-' in probeset) and len(probeset)>9:
                     system_code = 'En'
                     ensembl_gene = 'ENS'+string.split(probeset,'ENS')[1]
                     if ' ' in ensembl_gene:
@@ -666,7 +684,7 @@ def exportGOEliteInput(headers,system_code):
                     system_code = 'Sy'
             except Exception:
                 pass
-            if ('ENS' in probeset or 'ENF' in probeset) and system_code == 'Sy':
+            if ('ENS' in probeset or 'ENF' in probeset) and system_code == 'Sy' and len(probeset)>9:
                 system_code = 'En'
             values = string.join([probeset,system_code],'\t')+'\n'; goelite.write(values)
         goelite.close()
@@ -924,7 +942,7 @@ def exportGeometricFolds(filename,platform,genes_to_import,probeset_symbol,expor
         
     """ Import sample and gene expression values from input file, filter, calculate geometric folds
     and export. Use for clustering and QC."""
-    print '\n',filename
+    #print '\n',filename
     filename = string.replace(filename,'///','/')
     filename = string.replace(filename,'//','/')
     if 'ExpressionOutput' in filename:
@@ -971,9 +989,11 @@ def exportGeometricFolds(filename,platform,genes_to_import,probeset_symbol,expor
         for line in open(fn,'rU').xreadlines():
             data = cleanUpLine(line)
             t = string.split(data,'\t')
+
             if data[0]=='#' and row_number==0: row_number = 0
             elif row_number==0:
                 sample_list,group_sample_db,group_db,group_name_sample_db,comp_groups,comps_name_db = simpleGroupImport(groups_dir)
+
                 try: sample_index_list = map(lambda x: t[1:].index(x), sample_list) ### lookup index of each sample in the ordered group sample list
                 except Exception:
                     missing=[]
@@ -999,58 +1019,74 @@ def exportGeometricFolds(filename,platform,genes_to_import,probeset_symbol,expor
                 row_number=1
             else:
                 gene = t[0]
+
                 if platform == 'RNASeq':
                     ### Convert to log2 RPKM values - or counts
                     try: values = map(lambda x: math.log(float(x)+increment,2), t[1:])
                     except Exception:
-                        values = logTransformWithNAs(t[1:],increment)
+                        if convertNonLogToLog:
+                            values = logTransformWithNAs(t[1:],increment)
+                        else:
+                            values = TransformWithNAs(t[1:])
                 else:
-                    try: values = map(float,t[1:])
+                    try:
+                        if convertNonLogToLog:
+                            values = map(lambda x: math.log(float(x)+increment,2), t[1:])
+                        else:
+                            values = map(float,t[1:])
                     except Exception:
-                        values = logTransformWithNAs(t[1:],increment)
+                        if convertNonLogToLog:
+                            values = logTransformWithNAs(t[1:],increment)
+                        else:
+                            values = TransformWithNAs(t[1:])
                 
                 ### Calculate log-fold values relative to the mean of all sample expression values
+
                 values = map(lambda x: values[x], sample_index_list) ### simple and fast way to reorganize the samples
+
                 try: avg = statistics.avg(values)
                 except Exception:
                     values2=[]
                     for v in values:
                         try: values2.append(float(v))
                         except Exception: pass
-                    values = values2
-                    try: avg = statistics.avg(values)
+                    try: avg = statistics.avg(values2)
                     except Exception:
-                        if len(values)>0: avg = values[0]
+                        if len(values2)>0: avg = values2[0]
                         else: avg = 0
-                if convertNonLogToLog and platform != 'RNASeq':
-                    ### Rather than convert the values to log, and perform mean subtraction to derive folds, calculate in non-log space and then convert the folds to log
-                    try: log_folds = map(lambda x: math.log(((x+increment/(avg+1))),2), values)
-                    except Exception:
-                        log_folds=[]
-                        for x in values:
-                            try: log_folds.append(math.log(((x+increment/(avg+1))),2))
-                            except Exception: log_folds.append('')
-                        
-                else:
-                    try: log_folds = map(lambda x: (x-avg), values)
-                    except Exception: 
-                        log_folds=[]
-                        for x in values:
-                            try: log_folds.append(x-avg)
-                            except Exception: log_folds.append('')
+
+                try: log_folds = map(lambda x: (x-avg), values)
+                except Exception: 
+                    log_folds=[]
+                    for x in values:
+                        try: log_folds.append(x-avg)
+                        except Exception: log_folds.append('')
+
                 if gene in genes_to_import:
                     ### Genes regulated in any user-indicated comparison according to the fold and pvalue cutoffs provided
                     log_folds = map(lambda x: str(x), log_folds)
-                    try: gene = gene+' '+probeset_symbol[gene]
-                    except Exception: gene = gene
-                    export_data.write(string.join([gene]+log_folds,'\t')+'\n')
+                    try: gene2 = gene+' '+probeset_symbol[gene]
+                    except Exception: gene2 = gene
+                    if len(t[1:])!=len(log_folds):
+                        log_folds = t[1:] ### If NAs - output the original values
+                    export_data.write(string.join([gene2]+log_folds,'\t')+'\n')
 
                     if exportRelative:
                         ### Calculate log-fold values relative to the mean of each valid group comparison
                         control_group_avg={}; comps_exp_db={}
                         for group_name in comps_name_db: ### control group names
                             con_group_values = map(lambda x: values[x], group_index_db[group_name]) ### simple and fast way to reorganize the samples
-                            control_group_avg[group_name] = statistics.avg(con_group_values) ### store the mean value of each control group
+                            try: control_group_avg[group_name] = statistics.avg(con_group_values) ### store the mean value of each control group
+                            except Exception:
+                                con_group_values2=[]
+                                for val in con_group_values:
+                                    try: con_group_values2.append(float(val))
+                                    except Exception: pass
+                                    try: control_group_avg[group_name] = statistics.avg(con_group_values)
+                                    except Exception:
+                                        if len(con_group_values)>0:
+                                            control_group_avg[group_name] = con_group_values[0]
+                                        else: control_group_avg[group_name] = 0.0
                             for exp_group in comps_name_db[group_name]:
                                 try: comps_exp_db[exp_group].append(group_name) ### Create a reversed version of the comps_name_db, list experimental as the key
                                 except Exception: comps_exp_db[exp_group] = [group_name]
@@ -1063,16 +1099,13 @@ def exportGeometricFolds(filename,platform,genes_to_import,probeset_symbol,expor
                                 for control_group_name in comps_exp_db[group_name]:
                                     con_avg = control_group_avg[control_group_name]
                                     
-                                    if convertNonLogToLog and platform != 'RNASeq':
-                                        relative_log_folds += map(lambda x: str(math.log(((x+increment)/(con_avg+increment)),2)), group_values) ### calculate log-folds and convert to strings
-                                    else:
-                                        try:
-                                            relative_log_folds += map(lambda x: str(x-con_avg), group_values) ### calculate log-folds and convert to strings
-                                        except Exception:
-                                            relative_log_folds=[]
-                                            for x in group_values:
-                                                try: relative_log_folds.append(str(x-con_avg))
-                                                except Exception: relative_log_folds.append('')
+                                    try:
+                                        relative_log_folds += map(lambda x: str(x-con_avg), group_values) ### calculate log-folds and convert to strings
+                                    except Exception:
+                                        relative_log_folds=[]
+                                        for x in group_values:
+                                            try: relative_log_folds.append(str(x-con_avg))
+                                            except Exception: relative_log_folds.append('')
                             
                                     if relative_headers_exported == False:
                                         exp_sample_names = group_name_sample_db[group_name]
@@ -1082,13 +1115,14 @@ def exportGeometricFolds(filename,platform,genes_to_import,probeset_symbol,expor
                             title = string.join(['UID']+relative_column_names,'\t')+'\n' ### Export column headers for the relative fold changes
                             export_relative.write(title)
                             relative_headers_exported = True
-                          
-                        export_relative.write(string.join([gene]+relative_log_folds,'\t')+'\n')
+                        if len(t[1:])!=len(relative_log_folds):
+                            relative_log_folds = t[1:] ### If NAs - output the original values
+                        export_relative.write(string.join([gene2]+relative_log_folds,'\t')+'\n')
                             
                 elif exportOutliers:
                     ### When a gene is regulated and not significant, export to the outlier set
-                    try: gene = gene+' '+probeset_symbol[gene]
-                    except Exception: gene = gene
+                    try: gene2 = gene+' '+probeset_symbol[gene]
+                    except Exception: gene2 = gene
                     ### These are defaults we may allow the user to control later
                     log_folds = [0 if x=='' else x for x in log_folds] ### using list comprehension, replace '' with 0
                     if max([max(log_folds),abs(min(log_folds))])>1:
@@ -1097,7 +1131,9 @@ def exportGeometricFolds(filename,platform,genes_to_import,probeset_symbol,expor
                             if max(values)<0.1: proceed = False
                         if proceed == True:
                             log_folds = map(lambda x: str(x), log_folds)
-                            export_outliers.write(string.join([gene]+log_folds,'\t')+'\n')
+                            if len(t[1:])!=len(log_folds):
+                                log_folds = t[1:] ### If NAs - output the original values
+                            export_outliers.write(string.join([gene2]+log_folds,'\t')+'\n')
                             
                 row_number+=1 ### Keep track of the first gene as to write out column headers for the relative outputs
                 
@@ -1109,6 +1145,14 @@ def logTransformWithNAs(values,increment):
     values2=[]
     for x in values:
         try: values2.append(math.log(float(x)+increment,2))
+        except Exception:
+            values2.append('')
+    return values2
+
+def TransformWithNAs(values):
+    values2=[]
+    for x in values:
+        try: values2.append(float(x))
         except Exception:
             values2.append('')
     return values2
@@ -1636,7 +1680,8 @@ def combineLPResultFiles(input_files):
         o.close()
     except Exception: pass
     
-    returnRowHeaderForMaxEntry(output_file,10)
+    try: returnRowHeaderForMaxEntry(output_file,10)
+    except Exception: pass
     return output_file
 
 def visualizeQCPlots(expr_input_dir):
@@ -1655,7 +1700,7 @@ def visualizeQCPlots(expr_input_dir):
         
         print 'Building hierarchical cluster graphs...'
         paths = getSampleLogFoldFilenames(expr_input_dir)
-        graphic_links = clustering.outputClusters(paths,graphic_links, Normalize='row mean')
+        graphic_links = clustering.outputClusters(paths,graphic_links, Normalize='median',Species=species)
         try: graphic_links = clustering.runPCAonly(original_expr_input_dir,graphic_links,False,plotType='2D',display=False)
         except Exception: pass
     except Exception:
@@ -2120,20 +2165,6 @@ def buildAltExonClusterInputs(input_folder,species,platform,dataType='AltExonCon
 def exportHeatmap(filename,useHOPACH=True, color_gradient='red_black_sky',normalize=False,columnMethod='average',size=0,graphics=[]):
     import clustering
     row_method = 'weighted'; row_metric = 'cosine'; column_method = 'average'; column_metric = 'euclidean'; transpose = False
-    if useHOPACH:
-        try:
-            from pyper import R
-            r = R(use_numpy=True)
-            print_out = r('library("hopach")')
-            if "Error" in print_out:
-                print 'Installing the R package "hopach" in Config/R'
-                print_out = r('source("http://bioconductor.org/biocLite.R"); biocLite("hopach")')
-                if "Error" in print_out: print 'unable to download the package "hopach"'; forceError
-            row_method = 'hopach'; column_method = 'hopach' ### Use HOPACH if installed
-        except Exception,e: pass
-    if size>3000:
-        row_method = 'average'
-    
     try:
         if columnMethod !=None:
             column_method = columnMethod
@@ -2436,7 +2467,7 @@ def compareRawJunctionExpression(root_dir,platform,species,critical_exon_db,expF
         i=0
         indexes=[]
         for e in events:
-            if e>4: indexes.append(i) ### minimum expression value
+            if e>min_exp_thresh: indexes.append(i) ### minimum expression value (changed from 5 to 10 8/5/2016)
             i+=1
         return indexes
     
@@ -3756,6 +3787,129 @@ def exportSorted(filename, sort_col, excludeHeader=True):
     except Exception:
         return ouput_file
     
+def importJunctionPositions(species,array_type):
+    ### Look up the junction coordinates for the region
+    if array_type == 'RNASeq':
+        probesets = 'junctions'
+    else:
+        probesets = 'probesets'
+    filename = 'AltDatabase/'+species+'/'+array_type+'/'+species+'_Ensembl_'+probesets+'.txt'
+    fn=filepath(filename)
+    region_db = {}
+    firstRow=True
+    for line in open(fn,'rU').xreadlines():
+        data = cleanUpLine(line)
+        t = string.split(data,'\t')
+        if firstRow: firstRow = False
+        else:
+            probeset = t[0]
+            gene = t[2]
+            chr = t[4]
+
+            if '|' in t[13]:
+                region1 = string.split(t[13],'|')[1]
+                region2 = string.split(t[14],'|')[0]
+                junction_coord = region1+'-'+region2
+                region_db[probeset] = junction_coord
+                region_db[junction_coord] = gene+':'+t[12],chr ### Junction region for this version of Ensembl
+    return region_db
+
+def convertArrayReciprocalJunctionToCoordinates(species,array_type,dir_path,start_version,end_version):
+    """ Script for taking junction array defined ASPIRE or LinearRegression junction pairs, extracting the region coordinates
+    and exporting those coordinates with end_version EnsMart block and region IDs"""
+    
+    UI.exportDBversion(start_version) ### Database EnsMart version
+    
+    region_db = importJunctionPositions(species,array_type)
+    
+    comparison_db={}
+    dir_list = UI.read_directory(dir_path)
+    for filename in dir_list:
+        if '.txt' in filename:
+            comparsion = string.split(filename,'.')[0]
+            proceed = False
+            if ('ASPIRE' in filename or 'egress' in filename) and ('GENE' not in filename and 'inclusion' in filename): proceed = True ### Need to create a special analysis just for reciprocal junctions
+            if proceed: ### Don't include splicing-index results for RNA-Seq
+                comparison_db[comparsion] = {}
+                fn=filepath(dir_path+'/'+filename)
+                x=0
+                for line in open(fn,'rU').xreadlines():
+                    data = cleanUpLine(line)
+                    t = string.split(data,'\t')
+                    if x==0:
+                        p1 = t.index('probeset1')
+                        p2 = t.index('probeset2')
+                        reg_call = t.index('regulation_call')
+                        e1 = t.index('exons1')
+                        x=1
+                    else:
+                        if '-' in t[e1]:
+                            jc1 = region_db[t[p1]]
+                            jc2 = region_db[t[p2]]
+                            chr = region_db[jc1][1]
+                            db = comparison_db[comparsion]
+                            db[jc1,jc2] = t[reg_call],chr
+
+    UI.exportDBversion(end_version) ### Database EnsMart version
+    converted_comparison_db = {}
+    region_db2 = importJunctionPositions(species,'RNASeq')
+    
+    eo = export.ExportFile(dir_path+'/converted_junction_events.txt')
+    succeed=0; fail=0
+    for comparison in comparison_db:
+        for (j1,j2) in comparison_db[comparison]:
+            reg_call,chr = comparison_db[comparison][(j1,j2)]
+            if j1 in region_db2 and j2 in region_db2:
+                junction1_id,chr = region_db2[j1]
+                junction2_id,chr = region_db2[j2]
+                #print junction1_id, junction2_id, j1,j2, comparison;sys.exit()
+            else:
+                junction1_id=''
+                junction2_id=''
+            j1=chr+':'+j1
+            j2=chr+':'+j2
+            values = string.join([comparison,j1,j2,junction1_id,junction2_id,reg_call],'\t')+'\n'
+            eo.write(values)
+    eo.close()
+        
+def convertPSIJunctionIDsToPositions(psi_file,regulated_file):
+    """ Links up PSI genomic positions with IDs in a significantly differentially regulated PSI results file """
+    
+    fn=filepath(psi_file)
+    x=0
+    coord_db = {}
+    for line in open(fn,'rU').xreadlines():
+        data = cleanUpLine(line)
+        t = string.split(data,'\t')
+        if x==0:
+            symbol = t.index('Symbol')
+            minor = t.index('Minor-Isoform')
+            major = t.index('Major Isoform')
+            coord = t.index('Coordinates')
+            x=1
+        else:
+            uid = t[symbol]+':'+t[minor]+'|'+t[major]
+            coordinates = t[coord]
+            coord_db[uid] = coordinates
+    
+    dir_path = export.findParentDir(regulated_file)
+    comparison = export.findFilename(regulated_file)
+    eo = export.ExportFile(dir_path+'/coordinate_PSI_events.txt')
+    fn=filepath(regulated_file) 
+    for line in open(fn,'rU').xreadlines():
+        data = cleanUpLine(line)
+        t = string.split(data,'\t')
+        event = t[0]
+        event = string.replace(event,'@',':')
+        event = string.replace(event,'&',':')
+        event = string.replace(event,'__','|')
+        regulation = t[1]
+        if event in coord_db:
+            coordinates = coord_db[event]
+            values = string.join([comparison,event,coordinates,regulation],'\t')+'\n'
+            eo.write(values)
+    eo.close()
+
 if __name__ == '__main__':
     #predictSplicingEventTypes('ENSG00000123352:E15.4-E16.1','ENSG00000123352:E15.3-E16.1');sys.exit()
     test=False
@@ -3765,9 +3919,12 @@ if __name__ == '__main__':
         for file in dir_list:
           if 'PSI-clust' in file: 
             filename = meanCenterPSI(directory+'/'+file)
-            filterJunctionExpression(filename,minPercentPresent=0.75)
+            #filterJunctionExpression(filename,minPercentPresent=0.75)
         #exportHeatmap('/Volumes/My Passport/AML-LAML/LAML1/AltResults/AlternativeOutput/Hs_RNASeq_top_alt_junctions-PSI-clust-filt.txt',color_gradient='yellow_black_blue',columnMethod='hopach')
-        sys.exit()
+        #sys.exit()
+    #convertPSIJunctionIDsToPositions('/Volumes/SEQ-DATA/Grimeslab/TopHat/AltResults/AlternativeOutput/Mm_RNASeq_top_alt_junctions-PSI.txt','/Users/saljh8/Documents/1-dataAnalysis/SplicingFactors/Grimes-MarkerFinder-v2.txt.txt')
+    #convertArrayReciprocalJunctionToCoordinates('Hs','junction','/Volumes/Time Machine Backups/dataAnalysis/SplicingFactor/Hs/hglue/Marto/AltResults/AlternativeOutput','EnsMart65','EnsMart72')
+    #sys.exit()
     
     fold = 2
     pval = 0.05
@@ -3826,11 +3983,11 @@ if __name__ == '__main__':
                     use_downregulated_labels = False
             else:
                 print "Warning! Command-line argument: %s not recognized. Exiting..." % opt; sys.exit()
-    
+
     ### Allow for import of genes to exclude (e.g., sex-associated or pseudogenes)
     try: genesToExclude = excludeGenesImport(excludeGenes)
     except Exception: genesToExclude = {}
-    
+    print analysis
     if array_type == 'RNASeq':
         gene_exp_threshold = 50
         gene_rpkm_threshold = 3
@@ -3838,7 +3995,8 @@ if __name__ == '__main__':
         matchAndCorrelate(directory, var, output_source, additional)
     if analysis == 'returnRowHeaderForMaxEntry':
         ### Used primarily for combining LineageProfiler z-scores to report the top categories across compendiums
-        returnRowHeaderForMaxEntry(directory,int(var))
+        try: returnRowHeaderForMaxEntry(directory,int(var))
+        except Exception: pass
     if analysis == 'featureCorrelate':
         try: output_file = output_file
         except Exception: output_file=directory
@@ -3849,11 +4007,12 @@ if __name__ == '__main__':
         ### but order by MarkerFinder correlations and groups
         orderHeatmapByMarkerFinderOrder(directory)
     if analysis == 'unbiased':
+        #python ExpressionBuilder.py --species Hs --platform RNASeq --i "/Volumes/My Passport/salomonis2/SRP042161_GBM-single-cell/bams/" --a unbiased --additional "/Volumes/My Passport/salomonis2/SRP042161_GBM-single-cell/bams/ExpressionInput/counts.GBM_scRNA-Seq.txt"
         import RNASeq
         #export_dir = '/Volumes/SEQ-DATA/Grimes/14018_gmp-pro/Lattice/Full/AltResults/Unbiased/DataPlots/Clustering-myeloblast-hierarchical_euclidean_euclidean.txt'
         #export_dir = '/Volumes/SEQ-DATA/SingleCell-Churko/AltResults/Unbiased/DataPlots/Clustering-CM-hierarchical_euclidean_euclidean.txt'
         #calculateNormalizedIntensities(directory, species, array_type, analysis_type = 'raw', expFile = additional)
-        var = unbiasedComparisonSpliceProfiles(directory,species,array_type,expFile=additional,min_events=4,med_events=9)
+        var = unbiasedComparisonSpliceProfiles(directory,species,array_type,expFile=additional,min_events=0,med_events=0)
         #export_dir, exported_IDs = var
         #print export_dir
         #RNASeq.correlateClusteredGenes(export_dir)

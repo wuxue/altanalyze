@@ -163,7 +163,7 @@ def runLineageProfiler(species,array_type,exp_input,exp_output,codingtype,compen
             #print traceback.format_exc()
             forceError
             
-    importGeneExpressionValues(exp_input,tissue_specific_db,translation_db)
+    importGeneExpressionValues(exp_input,tissue_specific_db,translation_db,species=species)
     ### If the incorrect gene system was indicated re-run with generic parameters
 
     if len(expession_subset)==0 and (array_type == "3'array" or array_type == 'AltMouse' or array_type == 'Other'):
@@ -175,8 +175,8 @@ def runLineageProfiler(species,array_type,exp_input,exp_output,codingtype,compen
             except Exception:
                 try: targetPlatform = 'gene'; importTissueSpecificProfiles(species)
                 except Exception: targetPlatform = "3'array"; importTissueSpecificProfiles(species)
-        importGeneExpressionValues(exp_input,tissue_specific_db,translation_db)
-    zscore_output_dir = analyzeTissueSpecificExpressionPatterns()
+        importGeneExpressionValues(exp_input,tissue_specific_db,translation_db,species=species)
+    zscore_output_dir = analyzeTissueSpecificExpressionPatterns(expInput=exp_input)
 
     return zscore_output_dir
 
@@ -288,12 +288,19 @@ def simpleUIDImport(filename):
         uid_db[string.split(data,'\t')[0]]=[]
     return uid_db
         
-def importGeneExpressionValues(filename,tissue_specific_db,translation_db,useLog=False):
+def importGeneExpressionValues(filename,tissue_specific_db,translation_db,useLog=False,previouslyRun=False,species=None):
     ### Import gene-level expression raw values           
     fn=filepath(filename); x=0; genes_added={}; gene_expression_db={}
     dataset_name = export.findFilename(filename)
     max_val=0
     print 'importing:',dataset_name
+    
+    try:
+        import gene_associations, OBO_import
+        gene_to_symbol = gene_associations.getGeneToUid(species,('hide','Ensembl-Symbol'))
+        symbol_to_gene = OBO_import.swapKeyValues(gene_to_symbol)
+    except Exception: symbol_to_gene={}
+    
     for line in open(fn,'rU').xreadlines():
         data = cleanUpLine(line)
         t = string.split(data,'\t')
@@ -315,6 +322,8 @@ def importGeneExpressionValues(filename,tissue_specific_db,translation_db,useLog
                     print gene, [translation_db[gene]];sys.exit()"""
                 try: gene = translation_db[gene] ### Ensembl annotations
                 except Exception: pass
+            try: gene = symbol_to_gene[gene][0] ### If RNASeq is the selected platform and Symbol is the uid
+            except Exception: pass
             if gene in tissue_specific_db:
                 index,tissue_exp=tissue_specific_db[gene]
                 try: genes_added[gene]+=1
@@ -349,8 +358,8 @@ def importGeneExpressionValues(filename,tissue_specific_db,translation_db,useLog
     expession_subset.sort() ### This order now matches that of 
     gene_expression_db=[]
     
-    if max_val<20 and platform == 'RNASeq':
-        importGeneExpressionValues(filename,tissue_specific_db,translation_db,useLog=True)
+    if max_val<20 and platform == 'RNASeq' and previouslyRun==False: ### Only allow to happen once
+        importGeneExpressionValues(filename,tissue_specific_db,translation_db,useLog=True,previouslyRun=True,species=species)
 
 def produceDetectionCalls(values,Platform):
     # Platform can be the compendium platform (targetPlatform) or analyzed data platform (platform or array_type)
@@ -422,7 +431,7 @@ def importExonIDTranslations(array_type,species,translate_to_genearray):
         del gene_translation_db; del gene_translation_db2
     return translation_db
 
-def analyzeTissueSpecificExpressionPatterns():
+def analyzeTissueSpecificExpressionPatterns(expInput=None):
     tissue_specific_sorted = []; genes_present={}; tissue_exp_db={}; gene_order_db={}; gene_order=[]
     for (index,vals) in expession_subset: genes_present[index]=[]
     for gene in tissue_specific_db:
@@ -478,7 +487,7 @@ def analyzeTissueSpecificExpressionPatterns():
         
     PearsonCorrelationAnalysis(sample_exp_db,tissue_exp_db)
     sample_exp_db=[]; tissue_exp_db=[]
-    zscore_output_dir = exportCorrelationResults()
+    zscore_output_dir = exportCorrelationResults(expInput)
     return zscore_output_dir
 
 def returnTissueSpecificExpressionProfiles(sample_exp_db,tissue_exp_db,tissue_to_index):
@@ -621,8 +630,12 @@ def replacePearsonPvalueWithZscore():
             scores.append([r,z,sample])
         tissue_comparison_scores[tissue] = scores
 
-def exportCorrelationResults():
-    corr_output_file = string.replace(exp_output_file,'DATASET','LineageCorrelations')
+def exportCorrelationResults(exp_input):
+    input_file = export.findFilename(exp_input)
+    if '.txt' in exp_output_file:
+        corr_output_file = string.replace(exp_output_file,'DATASET','LineageCorrelations')
+    else: ### Occurs when processing a non-standard AltAnalyze file
+        corr_output_file = exp_output_file+'/'+input_file
     corr_output_file = string.replace(corr_output_file,'.txt','-'+coding_type+'-'+compendiumPlatform+'.txt')
     if analysis_type == 'AltExon':
         corr_output_file = string.replace(corr_output_file,coding_type,'AltExon')
@@ -679,12 +692,12 @@ if __name__ == '__main__':
     vendor = 'Affymetrix'
     vendor = 'other:Symbol'
     vendor = 'other:Ensembl'
-    vendor = 'RNASeq'
+    #vendor = 'RNASeq'
     array_type = "exon"
-    array_type = "3'array"
-    array_type = "RNASeq"
+    #array_type = "3'array"
+    #array_type = "RNASeq"
     compendium_platform = "3'array"
-    #compendium_platform = "exon"
+    compendium_platform = "exon"
     #compendium_platform = "gene"
     #array_type = "junction"
     codingtype = 'ncRNA'
@@ -692,8 +705,8 @@ if __name__ == '__main__':
     #codingtype = 'AltExon'
     array_type = vendor, array_type
 
-    exp_input = "/Volumes/SEQ-DATA/Kamath/BedFiles/ExpressionInput/exp.AF-steady-state.txt"
-    exp_output = "/Volumes/SEQ-DATA/Kamath/BedFiles/ExpressionOutput/DATASET-AF.txt"
+    exp_input = "/Users/saljh8/Documents/1-conferences/GE/LineageMarkerAnalysis/Synapse-ICGS-EB-Ensembl.txt"
+    exp_output = "/Users/saljh8/Documents/1-conferences/GE/LineageMarkerAnalysis/temp.txt"
     #customMarkers = "/Users/nsalomonis/Desktop/dataAnalysis/qPCR/PAM50/AltAnalyze/ExpressionOutput/MarkerFinder/AVERAGE-training.txt"
     customMarkers = False
 

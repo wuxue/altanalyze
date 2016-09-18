@@ -16,7 +16,7 @@
 #OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE 
 #SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-import sys, string
+import sys, string, os
 import statistics
 import math
 import os.path
@@ -42,6 +42,8 @@ try:
 except Exception: pass
 try: import numpy
 except Exception: pass
+
+LegacyMode = True
 
 try:
     from scipy import average as Average
@@ -523,16 +525,30 @@ def checkBEDFileFormat(bed_dir,root_dir):
             print 'Exiting AltAnalyze'; forceError
     return chr_present
 
-def importBEDFile(bed_dir,root_dir,species,normalize_feature_exp,getReads=False,searchChr=None,getBiotype=None,testImport=False):
+def getStrandMappingData(species):
+    splicesite_db={}
+    refExonCoordinateFile = unique.filepath('AltDatabase/ensembl/'+species+'/'+species+'_Ensembl_exon.txt')
+    firstLine=True
+    for line in open(refExonCoordinateFile,'rU').xreadlines():
+        if firstLine: firstLine=False
+        else:
+            line = line.rstrip('\n')
+            t = string.split(line,'\t'); #'gene', 'exon-id', 'chromosome', 'strand', 'exon-region-start(s)', 'exon-region-stop(s)', 'constitutive_call', 'ens_exon_ids', 'splice_events', 'splice_junctions'
+            geneID, exon, chr, strand, start, stop = t[:6]
+            splicesite_db[chr,int(start)]=strand
+            splicesite_db[chr,int(stop)]=strand
+    return splicesite_db
+
+def importBEDFile(bed_dir,root_dir,species,normalize_feature_exp,getReads=False,searchChr=None,getBiotype=None,testImport=False,filteredJunctions=None):
     dir_list = read_directory(bed_dir)
     begin_time = time.time()
     if 'chr' not in searchChr:
         searchChr = 'chr'+searchChr
-    condition_count_db={}; neg_count=0; pos_count=0; junction_db={}; biotypes={}; algorithms={}; exon_len_db={}
+    condition_count_db={}; neg_count=0; pos_count=0; junction_db={}; biotypes={}; algorithms={}; exon_len_db={}; splicesite_db={}
 
     if testImport == 'yes': print "Reading user RNA-seq input data files"
     for filename in dir_list:
-        count_db={}; x=0
+        count_db={}; rows=0
         fn=filepath(bed_dir+filename)
         condition = export.findFilename(fn)
         if '__' in condition:
@@ -554,8 +570,9 @@ def importBEDFile(bed_dir,root_dir,species,normalize_feature_exp,getReads=False,
             for line in open(fn,delim).xreadlines(): ### changed rU to r to remove \r effectively, rather than read as end-lines
                 data = cleanUpLine(line)
                 t = string.split(data,'\t')
-                if x==0 or '#' == data[0]:
-                    format_description = data; x=1
+                rows+=1
+                if rows==1 or '#' == data[0]:
+                    format_description = data
                     algorithm = 'Unknown'
                     if 'TopHat' in format_description: algorithm = 'TopHat'
                     elif 'HMMSplicer' in format_description: algorithm = 'HMMSplicer'
@@ -567,26 +584,34 @@ def importBEDFile(bed_dir,root_dir,species,normalize_feature_exp,getReads=False,
                         algorithm = 'TCGA format'
                         if 'barcode' in t: junction_position = 1
                         else: junction_position = 0
+                    elif '.tab' in fn and len(t)==9:
+                        try: start = float(t[1]) ### expect this to be a numerical coordinate
+                        except Exception: continue
+                        algorithm = 'STAR'
+                        strand = '-' ### If no strand exists
+                        rows=2 ### allows this first row to be processed
+                        if len(splicesite_db)==0: ### get strand to pos info
+                            splicesite_db = getStrandMappingData(species)   
                     if testImport == 'yes': print condition, algorithm
-                else:
+                if rows>1:
                     try:
                         if ':' in t[0]:
                             chr = string.split(t[0],':')[0]
                         else: chr = t[0]
                         if 'chr' not in chr:
                             chr = 'chr'+chr
-                        if searchChr == chr or ('BioScope' in algorithm and searchChr == t[1]): proceed = 'yes'
+                        if searchChr == chr or ('BioScope' in algorithm and searchChr == t[1]): proceed = True
                         elif searchChr == 'chrMT' and ('BioScope' not in algorithm):
-                            if 'M' in chr: proceed = 'yes'
-                            else: proceed = 'no'
-                        else: proceed = 'no'
+                            if 'M' in chr: proceed = True
+                            else: proceed = False
+                        else: proceed = False
                     except IndexError:
                         print 'The input file:\n',filename
                         print 'is not formated as expected (format='+algorithm+').'
                         print 'search chromosome:',searchChr
                         print t; force_bad_exit
-                    if proceed == 'yes':
-                        proceed = 'no'
+                    if proceed:
+                        proceed = False
                         if '.tab' in fn or '.TAB' in fn:
                             ### Applies to non-BED format Junction and Exon inputs (BioScope)
                             if 'BioScope' in algorithm:
@@ -603,17 +628,35 @@ def importBEDFile(bed_dir,root_dir,species,normalize_feature_exp,getReads=False,
                                         exon1_stop,exon2_start = int(start),int(end); junction_id=''
                                         ### Adjust exon positions - not ideal but necessary. Needed as a result of exon regions overlapping by 1nt (due to build process)
                                         exon1_stop+=1; exon2_start-=1
-                                        if float(reads)>4: proceed = 'yes' ### Added in version 2.0.9 to remove rare novel isoforms
+                                        #if float(reads)>4 or getReads:
+                                        proceed = True ### Added in version 2.0.9 to remove rare novel isoforms
                                         seq_length = abs(exon1_stop-exon2_start)
                                 if algorithm == 'BioScope-junction':
                                     chr = t[1]; strand = t[2]; exon1_stop = int(t[4]); exon2_start = int(t[8]); count_paired = t[17]; count_single = t[19]; score=t[21]
                                     if 'chr' not in chr: chr = 'chr'+chr
                                     try: exon1_start = int(t[3]); exon2_stop = int(t[9])
-                                    except Exception: null=[] ### If missing, these are not assigned
+                                    except Exception: pass ### If missing, these are not assigned
                                     reads = str(int(float(count_paired))+int(float(count_single))) ### Users will either have paired or single read (this uses either)
                                     biotype = 'junction'; biotypes[biotype]=[]; junction_id=''
-                                    if float(reads)>4: proceed = 'yes' ### Added in version 2.0.9 to remove rare novel isoforms
+                                    if float(reads)>4 or getReads: proceed = True ### Added in version 2.0.9 to remove rare novel isoforms
                                     seq_length = abs(float(exon1_stop-exon2_start))
+                            if 'STAR' in algorithm:
+                                chr = t[0]; exon1_stop = int(t[1])-1; exon2_start = int(t[2])+1; strand=''
+                                if 'chr' not in chr: chr = 'chr'+chr
+                                reads = str(int(t[7])+int(t[6]))
+                                biotype = 'junction'; biotypes[biotype]=[]; junction_id=''
+                                if float(reads)>4 or getReads: proceed = True ### Added in version 2.0.9 to remove rare novel isoforms
+                                if (chr,exon1_stop) in splicesite_db:
+                                    strand = splicesite_db[chr,exon1_stop]
+                                elif (chr,exon2_start) in splicesite_db:
+                                    strand = splicesite_db[chr,exon2_start]
+                                #else: proceed = False
+                                seq_length = abs(float(exon1_stop-exon2_start))
+                                if strand == '-': ### switch the orientation of the positions
+                                    exon1_stop,exon2_start=exon2_start,exon1_stop
+                                exon1_start = exon1_stop; exon2_stop = exon2_start
+                                #if 9996685==exon1_stop and 10002682==exon2_stop:
+                                #print chr, strand, reads, exon1_stop, exon2_start,proceed;sys.exit()
                         else:
                             try:
                                 if algorithm == 'TCGA format':
@@ -641,13 +684,13 @@ def importBEDFile(bed_dir,root_dir,species,normalize_feature_exp,getReads=False,
                                     exon1_stop,exon1_start = b; exon2_stop,exon2_start = a
                                 else:
                                     exon1_stop = exon1_start+exon1_len; exon2_start=exon2_stop-exon2_len+1
-                                proceed = 'yes'
+                                if float(reads)>4 or getReads: proceed = True
                                 if algorithm == 'HMMSplicer':
                                     if '|junc=' in junction_id: reads = string.split(junction_id,'|junc=')[-1]
-                                    else: proceed = 'no'
+                                    else: proceed = False
                                 if algorithm == 'SpliceMap':
                                     if ')' in junction_id and len(junction_id)>1: reads = string.split(junction_id,')')[0][1:]
-                                    else: proceed = 'no'
+                                    else: proceed = False
                                 seq_length = abs(float(exon1_stop-exon2_start)) ### Junction distance
                             except Exception,e:
                                 #print traceback.format_exc();sys.exit()
@@ -664,11 +707,11 @@ def importBEDFile(bed_dir,root_dir,species,normalize_feature_exp,getReads=False,
                                     seq_length = abs(float(exon1_stop-exon2_start))
                                 ### Adjust exon positions - not ideal but necessary. Needed as a result of exon regions overlapping by 1nt (due to build process)
                                 exon1_stop+=1; exon2_start-=1
-                                if float(reads)>4: ### Added in version 2.0.9 to remove rare novel isoforms
-                                    proceed = 'yes'
-                                else: proceed = 'no'
+                                #if float(reads)>4 or getReads: ### Added in version 2.0.9 to remove rare novel isoforms
+                                proceed = True
+                                #else: proceed = False
 
-                        if proceed == 'yes':
+                        if proceed:
                             if 'chr' not in chr:
                                 chr = 'chr'+chr ### Add the chromosome prefix
                             if chr == 'chrM': chr = 'chrMT' ### MT is the Ensembl convention whereas M is the Affymetrix and UCSC convention
@@ -677,9 +720,16 @@ def importBEDFile(bed_dir,root_dir,species,normalize_feature_exp,getReads=False,
                             else: neg_count+=1
                             if getReads and seq_length>0:
                                 if getBiotype == biotype:
-                                    count_db[chr,exon1_stop,exon2_start] = reads
-                                    try: exon_len_db[chr,exon1_stop,exon2_start] = seq_length
-                                    except Exception: exon_len_db[chr,exon1_stop,exon2_start] = []
+                                    if biotype == 'junction':
+                                        ### We filtered for junctions>4 reads before, now we include all reads for expressed junctions
+                                        if (chr,exon1_stop,exon2_start) in filteredJunctions:
+                                            count_db[chr,exon1_stop,exon2_start] = reads
+                                            try: exon_len_db[chr,exon1_stop,exon2_start] = seq_length
+                                            except Exception: exon_len_db[chr,exon1_stop,exon2_start] = []
+                                    else:
+                                        count_db[chr,exon1_stop,exon2_start] = reads
+                                        try: exon_len_db[chr,exon1_stop,exon2_start] = seq_length
+                                        except Exception: exon_len_db[chr,exon1_stop,exon2_start] = []
                             elif seq_length>0:
                                 if (chr,exon1_stop,exon2_start) not in junction_db:
                                     ji = JunctionData(chr,strand,exon1_stop,exon2_start,junction_id,biotype)
@@ -1033,6 +1083,7 @@ def alignExonsAndJunctionsToEnsembl(species,exp_file_location_db,dataset_name,Mu
     exonFile = p.exonFile()
     junctionFile = p.junctionFile()
     junctionCompFile = p.junctionCompFile()
+    novelJunctionAnnotations = p.novelJunctionAnnotations()
     
     #chromosomes = ['chr1']
     #p('chrY'); p('chr1'); p('chr2')
@@ -1115,6 +1166,7 @@ def alignExonsAndJunctionsToEnsembl(species,exp_file_location_db,dataset_name,Mu
     catFiles(junctionFile,'junctions')
     catFiles(exonFile,'exons')
     catFiles(junctionCompFile,'comps')
+    catFiles(novelJunctionAnnotations,'denovo')
     
     if normalize_feature_exp == 'RPKM':
         fastRPKMCalculate(countsFile)
@@ -1189,6 +1241,10 @@ class AlignExonsAndJunctionsToEnsembl:
     def junctionCompFile(self):
         junction_comp_file = self.root_dir+'AltDatabase/'+self.species+'/RNASeq/'+self.species + '_junction_comps_updated.txt'
         return junction_comp_file
+    
+    def novelJunctionAnnotations(self):
+        junction_annotation_file = self.root_dir+'AltDatabase/ensembl/'+self.species+'/'+self.species + '_alternative_junctions_de-novo.txt'
+        return junction_annotation_file
     
     def AnalysisMode(self): return self.analysisMode
     
@@ -1619,7 +1675,7 @@ class AlignExonsAndJunctionsToEnsembl:
             
                     if platformType == 'RNASeq':
     
-                         condition_count_db,exon_len_db,biotypes2,algorithms = importBEDFile(bed_dir,root_dir,species,normalize_feature_exp,getReads=True,searchChr=searchchr,getBiotype=biotype,testImport=testImport)
+                         condition_count_db,exon_len_db,biotypes2,algorithms = importBEDFile(bed_dir,root_dir,species,normalize_feature_exp,getReads=True,searchChr=searchchr,getBiotype=biotype,testImport=testImport,filteredJunctions=self.junction_simple_db)
                     else:
                          condition_count_db,exon_len_db,biotypes2,algorithms = importExpressionMatrix(bed_dir,root_dir,species,fl,'yes',getBiotype=biotype)
                     ###First export original counts, rather than quantile normalized or RPKM
@@ -1684,12 +1740,12 @@ class AlignExonsAndJunctionsToEnsembl:
     def countsDir(self):
         return self.countsFile
     
-def calculateRPKMsFromGeneCounts(filename,species):
+def calculateRPKMsFromGeneCounts(filename,species,AdjustExpression):
     """ Manual way of calculating gene RPKMs from gene counts only """
     gene_lengths = getGeneExonLengths(species)
-    fastRPKMCalculate(filename,GeneLengths=gene_lengths)
+    fastRPKMCalculate(filename,GeneLengths=gene_lengths,AdjustExpression=AdjustExpression)
     
-def fastRPKMCalculate(counts_file,GeneLengths=None):
+def fastRPKMCalculate(counts_file,GeneLengths=None,AdjustExpression=True):
     export_path = string.replace(counts_file,'counts.','exp.')
     export_data = export.ExportFile(export_path) ### Write this new file
     fn=filepath(counts_file); header=True
@@ -1719,6 +1775,10 @@ def fastRPKMCalculate(counts_file,GeneLengths=None):
         jatr=Average(junction_sum_array) # Average of the total maped reads
         eatr=Average(exon_sum_array) # Average of the total maped reads
     
+    if AdjustExpression:
+        offset = 1
+    else:
+        offset = 0
     header=True
     c=math.pow(10.0,9.0)
     for line in open(fn,'rU').xreadlines():
@@ -1735,10 +1795,11 @@ def fastRPKMCalculate(counts_file,GeneLengths=None):
                 l=abs(int(coordinates[1])-int(coordinates[0])) ### read-length  
             except Exception: ### Manual way of calculating gene RPKMs from gene counts only
                 exon_id = t[0]
-                l = GeneLengths[exon_id]
-                        
-            try: read_counts = map(lambda x: int(x)+1, t[1:])
-            except Exception: read_counts = map(lambda x: int(float(x))+1, t[1:])
+                try: l = GeneLengths[exon_id]
+                except Exception: continue #Occurs when Ensembl genes supplied from an external analysis 
+                   
+            try: read_counts = map(lambda x: int(x)+offset, t[1:])
+            except Exception: read_counts = map(lambda x: int(float(x))+offset, t[1:])
             if '-' in exon_id:
                 count_stats = zip(read_counts,junction_sum_array)
                 atr = jatr
@@ -2282,13 +2343,15 @@ def combineDetectedExons(unmapped_exon_db,align_exon_db,novel_exon_db):
                     if x == 2: null=[]; #print 'SOME EXONS FOUND WITH ONLY ONE ALIGNING POSITION...',key,ji.GeneID(),ed1.ExonRegionID(),e1,e2
                 try: red1 = ed1.ExonRegionData(); red2 = ed2.ExonRegionData()
                 except Exception:
+                    """
                     print [ji.GeneID(), ji.Chr(), key]
                     print e1, e2
                     try: print ed1.ExonRegionData()
                     except Exception: 'ed1 failed'
                     try: print ed2.ExonRegionData()
                     except Exception: 'ed2 failed'
-                    kill
+                    """
+                    continue
                 region1 = ed1.ExonRegionID(); region2 = ed2.ExonRegionID()
                 #print region1,region2,ji.GeneID(),ji.Chr(),ji.Strand()
              
@@ -2691,11 +2754,14 @@ def singleCellRNASeqWorkflow(Species, platform, expFile, mlp, exp_threshold=5, r
     global species
     global rho_cutoff
     species = Species
+    removeOutliers = False
     if parameters != None:
         rpkm_threshold = parameters.ExpressionCutoff()
         exp_threshold = parameters.CountsCutoff()
         rho_cutoff = parameters.RhoCutoff()
         restrictBy = parameters.RestrictBy()
+        try: removeOutliers = parameters.RemoveOutliers()
+        except Exception: pass
         if platform == 'exons':
             rpkm_threshold=0
             exp_threshold=0
@@ -2703,7 +2769,7 @@ def singleCellRNASeqWorkflow(Species, platform, expFile, mlp, exp_threshold=5, r
         rho_cutoff = 0.4
         restrictBy = 'protein_coding'
     onlyIncludeDrivers=True
-    
+                
     if platform != 'exons':
         platform = checkExpressionFileFormat(expFile,platform)
 
@@ -2711,6 +2777,35 @@ def singleCellRNASeqWorkflow(Species, platform, expFile, mlp, exp_threshold=5, r
         if rpkm_threshold>1.9999:
             rpkm_threshold = math.log(rpkm_threshold,2) ### log2 transform
         
+    if removeOutliers:
+        ### Remove samples with low relative number of genes expressed
+        try:
+            import shutil
+            print '***Removing outlier samples***'
+            import sampleIndexSelection
+            output_file = expFile[:-4]+'-OutliersRemoved.txt'
+            sampleIndexSelection.statisticallyFilterFile(expFile,output_file,rpkm_threshold)
+            if 'exp.' in expFile:
+                ### move the original groups and comps files
+                groups_file = string.replace(expFile,'exp.','groups.')
+                groups_file = string.replace(groups_file,'-steady-state','')
+                groups_filtered_file = groups_file[:-4]+'-OutliersRemoved.txt'
+                comps_file = string.replace(groups_file,'groups.','comps.')
+                comps_filtered_file = string.replace(groups_filtered_file,'groups.','comps.')
+                counts_file = string.replace(expFile,'exp.','counts.')
+                counts_filtered_file = string.replace(output_file,'exp.','counts.')
+                try: os.rename(groups_file,groups_filtered_file) ### if present copy over
+                except Exception: pass
+                try: os.rename(comps_file,comps_filtered_file) ### if present copy over
+                except Exception: pass
+                try: shutil.copyfile(counts_file,counts_filtered_file) ### if present copy over
+                except Exception: pass
+            expFile = output_file
+            print ''
+        except Exception:
+            print '***Filtering FAILED***'
+            print traceback.format_exc()
+            
     expressed_uids_rpkm = getMaxCounts(expFile,rpkm_threshold)
     
     try: expressed_uids_counts = getMaxCounts(string.replace(expFile,'exp.','counts.'),exp_threshold)
@@ -2724,7 +2819,7 @@ def singleCellRNASeqWorkflow(Species, platform, expFile, mlp, exp_threshold=5, r
     print 'Genes filtered by counts:',len(expressed_uids_counts)
     print 'Genes filtered by expression:',len(expressed_uids_rpkm),len(expressed_uids)
     #expressed_uids = filterByProteinAnnotation(species,expressed_uids)
-    print len(expressed_uids), 'expressed genes by RPKM (%d) and counts (%d)' % (rpkm_threshold,exp_threshold)
+    print len(expressed_uids), 'expressed genes by RPKM/TPM (%d) and counts (%d)' % (rpkm_threshold,exp_threshold)
     #"""
 
     import OBO_import; import ExpressionBuilder
@@ -2735,6 +2830,7 @@ def singleCellRNASeqWorkflow(Species, platform, expFile, mlp, exp_threshold=5, r
         restrictBy = None
         biological_categories={}
         print 'Missing annotation file in:','AltDatabase/uniprot/'+species+'/custom_annotations.txt !!!!!'
+
     if restrictBy !=None:
         genes = biological_categories['protein_coding']
         genes_temp=dict(genes)
@@ -2752,7 +2848,7 @@ def singleCellRNASeqWorkflow(Species, platform, expFile, mlp, exp_threshold=5, r
     genes.update(biological_categories['kinase'])
     genes.update(biological_categories['GPCR'])
     """
-    expressed_uids_db={}; driver_genes={}
+    expressed_uids_db={}; guide_genes={}
     for id in expressed_uids: expressed_uids_db[id]=[]
     if platform == 'exons': ### For splicing-index value filtering
         expressed_uids=[]
@@ -2769,10 +2865,10 @@ def singleCellRNASeqWorkflow(Species, platform, expFile, mlp, exp_threshold=5, r
         for id in expressed_uids: expressed_uids_db2[id]=[]
         
         if drivers != False:
-            driver_genes = getDrivers(drivers)
+            guide_genes = getDrivers(drivers)
             if onlyIncludeDrivers:
-                try: expressed_uids = driver_genes.viewkeys() & expressed_uids_db2.viewkeys() ### common
-                except Exception: expressed_uids = getOverlappingKeys(driver_genes,expressed_uids_db2)
+                try: expressed_uids = guide_genes.viewkeys() & expressed_uids_db2.viewkeys() ### common
+                except Exception: expressed_uids = getOverlappingKeys(guide_genes,expressed_uids_db2)
 
     if len(expressed_uids)<10:
         expressed_uids=[]
@@ -2780,7 +2876,7 @@ def singleCellRNASeqWorkflow(Species, platform, expFile, mlp, exp_threshold=5, r
             expressed_uids.append(uid)
     print len(expressed_uids), 'expressed IDs being further analyzed'
     #sys.exit()
-    print_out = findCommonExpressionProfles(expFile,species,platform,expressed_uids,driver_genes,mlp,parameters=parameters,reportOnly=reportOnly)
+    print_out = findCommonExpressionProfiles(expFile,species,platform,expressed_uids,guide_genes,mlp,parameters=parameters,reportOnly=reportOnly)
     return print_out
 
 def getOverlappingKeys(db1,db2):
@@ -2997,29 +3093,31 @@ def intraCorrelation(expressed_values,mlp):
         for k in a: correlated_genes[k] = a[k]
     return correlated_genes
 
-def findCommonExpressionProfles(expFile,species,platform,expressed_uids,driver_genes,mlp,fold=2,samplesDiffering=2,parameters=None,reportOnly=False):
+def findCommonExpressionProfiles(expFile,species,platform,expressed_uids,guide_genes,mlp,fold=2,samplesDiffering=2,parameters=None,reportOnly=False):
     use_CV=False
-    ### POTENTIONAL GOALS: FILTER OUT PATHWAY ASSOCIATED GENES SUCH AS CELL CYCLE TO REMOVE THOSE EFFECTS
-    ### ADDED WEIGHTED DRIVER GENES INTO THE ANALYSIS AT THE USER'S DESCRETION
-    ### SORT INITIALLY ONLY BY TFS/CELL SURFACE OR OTHERS TO EVALUTE CLUSTERS AND INITIAL DATA
-    ### DON'T NECESSARILY REQUIRE MORE THAN 9 TO FIND PATTERNS (ESPECIALLY WITH JUST TFs)
-    ### DON'T BE AS STRINGENT WITH REQURING EFFECT IN MANY SAMPLES OR WITH SUCH HIGH FOLD
-    ### USE A FASTER SURROGATE CLUSTERING METHOD
     
     row_metric = 'correlation'; row_method = 'average'
     column_metric = 'cosine'; column_method = 'hopach'
+    original_column_metric = column_metric
+    original_column_method = column_method
     color_gradient = 'yellow_black_blue'; transpose = False; graphic_links=[]
     if parameters != None:
         fold = parameters.FoldDiff()
         samplesDiffering = parameters.SamplesDiffering()
         amplifyGenes = parameters.amplifyGenes()
+        if 'Guide' in parameters.GeneSelection():
+            amplifyGenes = False ### This occurs when running ICGS with the BOTH option, in which Guide3 genes are retained - ignore these
+            parameters.setGeneSelection('')
+            parameters.setClusterGOElite('')
         excludeCellCycle = parameters.ExcludeCellCycle()
         import clustering
         row_metric = 'correlation'; row_method = 'average'
         column_metric = parameters.ColumnMetric(); column_method = parameters.ColumnMethod()
+        original_column_metric = column_metric
+        original_column_method = column_method
         color_gradient = 'yellow_black_blue'; graphic_links=[]
         if platform == 'exons': color_gradient = 'yellow_black_blue'
-        driver_genes = parameters.JustShowTheseIDs()
+        guide_genes = parameters.JustShowTheseIDs()
         cell_cycle_id_list = []
     else:
         amplifyGenes = False
@@ -3028,15 +3126,18 @@ def findCommonExpressionProfles(expFile,species,platform,expressed_uids,driver_g
     if platform != 'exons':
         platform = checkExpressionFileFormat(expFile,platform)
     else:
-        fold = math.pow(2,0.5)
+        if LegacyMode: pass
+        else:
+            fold = math.pow(2,0.5)
         fold = 1.25
+    
     #"""
     if use_CV:
-        expressed_values, fold, samplesDiffering, headers = CoeffVar(expFile,platform,expressed_uids,fold=2,samplesDiffering=2,guideGenes=driver_genes)
+        expressed_values, fold, samplesDiffering, headers = CoeffVar(expFile,platform,expressed_uids,fold=2,samplesDiffering=2,guideGenes=guide_genes)
     else:
         print 'Finding an optimal number of genes based on differing thresholds to include for clustering...'
         #fold=1; samplesDiffering=1
-        expressed_values, fold, samplesDiffering, headers = optimizeNumberOfGenesForDiscovery(expFile,platform,expressed_uids,fold=fold,samplesDiffering=samplesDiffering,guideGenes=driver_genes) #fold=2,samplesDiffering=2
+        expressed_values, fold, samplesDiffering, headers = optimizeNumberOfGenesForDiscovery(expFile,platform,expressed_uids,fold=fold,samplesDiffering=samplesDiffering,guideGenes=guide_genes) #fold=2,samplesDiffering=2
         print 'Evaluating',len(expressed_values),'genes, differentially expressed',fold,'fold for at least',samplesDiffering*2,'samples'
     #sys.exit()
     
@@ -3053,10 +3154,10 @@ def findCommonExpressionProfles(expFile,species,platform,expressed_uids,driver_g
         transpose = cc_param
         filtered_file = export.findParentDir(expFile)+'/amplify/'+export.findFilename(expFile)
         writeFilteredFile(filtered_file,platform,headers,{},expressed_values,[])
-        if len(expressed_values)<2000:
+        if len(expressed_values)<1000:
             row_method = 'hopach'; row_metric = 'correlation'
         if column_method != 'hopach': row_method = 'average' ### needed due to PC errors
-        cc_graphic_links = clustering.runHCexplicit(filtered_file, graphic_links, row_method, row_metric, column_method, column_metric, color_gradient, transpose, display=False, Normalize=True, JustShowTheseIDs=driver_genes)
+        cc_graphic_links = clustering.runHCexplicit(filtered_file, graphic_links, row_method, row_metric, column_method, column_metric, color_gradient, transpose, display=False, Normalize=True, JustShowTheseIDs=guide_genes)
         cell_cycle_id_list = genericRowIDImport(string.replace(cc_graphic_links[0][-1],'.png','.txt'))
         expressed_values2 = {}
         for id in expressed_values:
@@ -3072,6 +3173,8 @@ def findCommonExpressionProfles(expFile,species,platform,expressed_uids,driver_g
     filtered_file = export.findParentDir(expFile)+'/amplify/'+export.findFilename(expFile)
     groups_file = string.replace(expFile,'exp.','groups.')
     groups_filtered_file = string.replace(filtered_file,'exp.','groups.')
+    groups_file = string.replace(groups_file,'-steady-state','')
+    groups_filtered_file = string.replace(groups_filtered_file,'-steady-state','')
     try: export.customFileCopy(groups_file,groups_filtered_file) ### if present copy over
     except Exception: pass
     writeFilteredFile(filtered_file,platform,headers,{},expressed_values,[])
@@ -3083,16 +3186,24 @@ def findCommonExpressionProfles(expFile,species,platform,expressed_uids,driver_g
         print_out = '%d genes, differentially expressed %d fold for at least %d samples' % (len(expressed_values), fold, samplesDiffering*2)
         return print_out
 
-    if len(expressed_values)<2000 and column_method == 'hopach':
+    if len(expressed_values)<1400 and column_method == 'hopach':
         row_method = 'hopach'; row_metric = 'correlation'
     else:
         row_method = 'weighted'; row_metric = 'cosine'
     if amplifyGenes:
         transpose = parameters
-        parameters.setGeneSelection(parameters.GeneSelection()+' IntraCorrelatedOnly amplify')
-        print 'Finding intra-correlated genes from the input geneset(s)...'
+        try:
+            if len(parameters.GeneSelection())>0:
+                parameters.setGeneSelection(parameters.GeneSelection()+' amplify')
+                print 'Finding correlated genes to the input geneset(s)...'
+            else:
+                print 'Finding intra-correlated genes from the input geneset(s)...'
+                parameters.setGeneSelection(parameters.GeneSelection()+' IntraCorrelatedOnly amplify')
+        except Exception:         
+            parameters.setGeneSelection(parameters.GeneSelection()+' IntraCorrelatedOnly amplify')
+            print 'Finding intra-correlated genes from the input geneset(s)...'
         if column_method != 'hopach': row_method = 'average' ### needed due to PC errors
-        graphic_links = clustering.runHCexplicit(filtered_file, graphic_links, row_method, row_metric, column_method, column_metric, color_gradient, transpose, display=False, Normalize=True, JustShowTheseIDs=driver_genes)
+        graphic_links = clustering.runHCexplicit(filtered_file, graphic_links, row_method, row_metric, column_method, column_metric, color_gradient, transpose, display=False, Normalize=True, JustShowTheseIDs=guide_genes)
         #return graphic_links
         import clustering
         matrix, column_header, row_header, dataset_name, group_db = clustering.importData(graphic_links[-1][-1][:-4]+'.txt')
@@ -3101,8 +3212,11 @@ def findCommonExpressionProfles(expFile,species,platform,expressed_uids,driver_g
         for i in row_header: ### Filter the expressed values for the intra-correlated queried gene set and replace
             try: expressed_values2[i]=expressed_values[i]
             except Exception:
-                e = symbol_to_gene[i][0]
-                expressed_values2[e]=expressed_values[e]
+                try:
+                    e = symbol_to_gene[i][0]
+                    expressed_values2[e]=expressed_values[e]
+                except Exception: 
+                    pass
         expressed_values = expressed_values2
         
     print 'Looking for common gene expression profiles for class assignment...',
@@ -3111,6 +3225,9 @@ def findCommonExpressionProfles(expFile,species,platform,expressed_uids,driver_g
     useNumpyCorr=True
     negative_rho = rho_cutoff*-1
     
+    #results_file = string.replace(expFile[:-4]+'-CORRELATED-FEATURES.txt','exp.','/SamplePrediction/')
+    #eo = export.ExportFile(results_file[:-4]+'-genes.txt')
+
     if useNumpyCorr:
         row_ids=[]
         x = []
@@ -3130,12 +3247,13 @@ def findCommonExpressionProfles(expFile,species,platform,expressed_uids,driver_g
                 refgene = string.split(geneID,':')[0]
                 k=0
                 for v in score_ls:            
-                    if v>rho_cutoff:# #or v<negative_rho:
+                    if v>rho_cutoff:# or v<negative_rho:
                         if refgene not in row_ids[k]:
                             correlated.append((v,row_ids[k]))
                     k+=1
                 correlated.sort()
-                correlated.reverse()
+                if LegacyMode == False:
+                    correlated.reverse()
                 correlated = map(lambda x:x[1],correlated)
                 correlated_genes[geneID] = correlated
                 i+=1
@@ -3143,18 +3261,22 @@ def findCommonExpressionProfles(expFile,species,platform,expressed_uids,driver_g
             for score_ls in D1:
                 correlated = []
                 geneID = row_ids[i]
-                k=0
+                k=0; temp=[]
                 for v in score_ls:
-                    if v>rho_cutoff:# #or v<negative_rho:
+                    if v>rho_cutoff:# or v<negative_rho:
                         #scores.append((v,row_ids[k]))
                         correlated.append((v,row_ids[k]))
+                        #temp.append((geneID,row_ids[k],str(v)))
                     k+=1
                 correlated.sort()
-                correlated.reverse()
+                if LegacyMode == False:
+                    correlated.reverse()
                 correlated = map(lambda x:x[1],correlated)
-                correlated_genes[geneID] = correlated
+                if len(correlated)>0:
+                    correlated_genes[geneID] = correlated
+                    #for (a,b,c) in temp: eo.write(a+'\t'+b+'\t'+c+'\n')
+                    
                 i+=1
-
     else:
         ### Find common patterns now
         performAllPairwiseComparisons = True
@@ -3164,22 +3286,17 @@ def findCommonExpressionProfles(expFile,species,platform,expressed_uids,driver_g
         else: correlated_genes={}
         
     atleast_10={}
-    #print len(correlated_genes), 'initial'
     if len(correlated_genes)<70: connections = 0
     elif len(correlated_genes)<110: connections = 4
     else: connections = 5
 
-    #print 'len(correlated_genes)',len(correlated_genes),connections
     numb_corr=[]
     for i in correlated_genes:
-        #if i == 'ENSG00000016082': print 'ISL1',len(correlated_genes[i])
-        #if i=='Gfi1': print 'Gfi1',len(correlated_genes[i]),correlated_genes[i]
         if len(correlated_genes[i])>connections:
             numb_corr.append([len(correlated_genes[i]),i])
             atleast_10[i]=correlated_genes[i] ### if atleast 10 genes apart of this pattern
             x=0
             for k in correlated_genes[i]:
-                #if k=='Gfi1': print 'Gfi1 connected',i,x
                 if x<30: ### cap it at 30
                     atleast_10[k]=correlated_genes[k] ### add all correlated keys and values
                 x+=1
@@ -3192,9 +3309,12 @@ def findCommonExpressionProfles(expFile,species,platform,expressed_uids,driver_g
                 atleast_10[i]=correlated_genes[i] ### if atleast 10 genes apart of this pattern
                 for k in correlated_genes[i]:
                     atleast_10[k]=correlated_genes[k] ### add all correlated keys and values
+
     if len(atleast_10) == 0:
         atleast_10 = expressed_values
-       
+        
+    #eo.close()
+    print len(atleast_10), 'genes correlated to multiple other members (initial filtering)'
     ### go through the list from the most linked to the least linked genes, only reported the most linked partners
     
     removeOutlierDrivenCorrelations=True
@@ -3227,17 +3347,24 @@ def findCommonExpressionProfles(expFile,species,platform,expressed_uids,driver_g
                 #if gene_to_symbol_db[gene][0] == 'ISL1' or gene_to_symbol_db[gene][0] == 'CD10' or gene_to_symbol_db[gene][0] == 'POU3F2':
 
                 if len(correlated_hits)>0:
-                    if (float(len(correlated_hits))+1)/len(correlated_genes[gene])<0.5 or avg_corr<(rho_cutoff-0.1):
-                        #exclude_corr.append(key)
-                        #if gene == 'XXX': print len(correlated_hits),len(correlated_genes[gene]), avg_corr, rho_cutoff-0.1
-                        pass
+                    if LegacyMode:
+                        if (float(len(correlated_hits))+1)/len(correlated_genes[gene])<0.5 or avg_corr<rho_cutoff:  ### compare to the below
+                            pass
+                        else:
+                            numb_corr2.append([len(correlated_hits),gene])
                     else:
-                        numb_corr2.append([len(correlated_hits),gene])
+                        if (float(len(correlated_hits))+1)/len(correlated_genes[gene])<0.5 or avg_corr<(rho_cutoff-0.1):
+                            #exclude_corr.append(key)
+                            #if gene == 'XXX': print len(correlated_hits),len(correlated_genes[gene]), avg_corr, rho_cutoff-0.1
+                            pass
+                        else:
+                            numb_corr2.append([len(correlated_hits),gene])
                 #print (float(len(correlated_hits))+1)/len(correlated_genes[gene]), len(correlated_genes[gene]), key
                 
         numb_corr = numb_corr2
         numb_corr.sort(); numb_corr.reverse()
     
+    #print len(numb_corr)
     exclude_corr={}; new_filtered_set={}
     limit=0
     for key in numb_corr: ### key gene
@@ -3254,8 +3381,8 @@ def findCommonExpressionProfles(expFile,species,platform,expressed_uids,driver_g
     atleast_10 = new_filtered_set
         
     addMultipleDrivers=True
-    if len(driver_genes)>0 and addMultipleDrivers: ### Artificially weight the correlated genes with known biological driverse
-        for gene in driver_genes:
+    if len(guide_genes)>0 and addMultipleDrivers: ### Artificially weight the correlated genes with known biological driverse
+        for gene in guide_genes:
             y=1
             while y<2:
                 if y==1:
@@ -3268,23 +3395,26 @@ def findCommonExpressionProfles(expFile,species,platform,expressed_uids,driver_g
                     #print gene+'-'+str(y)
                 y+=1
     
-
     #atleast_10 = expressed_values
 
     results_file = string.replace(expFile[:-4]+'-CORRELATED-FEATURES.txt','exp.','/SamplePrediction/')
     writeFilteredFile(results_file,platform,headers,gene_to_symbol_db,expressed_values,atleast_10)
-
+    
+    print len(atleast_10),'final correlated genes'
     end_time = time.time()
     print 'Initial clustering completed in',int(end_time-begin_time),'seconds'
     
     
     results_file = string.replace(expFile[:-4]+'-CORRELATED-FEATURES.txt','exp.','/SamplePrediction/')
 
-    if len(atleast_10)<1500 and column_method == 'hopach':
+    if len(atleast_10)<1200 and column_method == 'hopach':
         row_method = 'hopach'; row_metric = 'correlation'
     else:
-        row_method = 'weighted'; row_metric = 'cosine'
-    print row_method, row_metric
+        if LegacyMode:
+            row_method = 'average'; row_metric = 'euclidean'
+        else:
+            row_method = 'weighted'; row_metric = 'cosine'
+    #print row_method, row_metric
     correlateByArrayDirectly = False
     if correlateByArrayDirectly:
         import clustering
@@ -3314,45 +3444,58 @@ def findCommonExpressionProfles(expFile,species,platform,expressed_uids,driver_g
             import clustering
             if platform == 'exons': color_gradient = 'yellow_black_blue'
             transpose = False
-            if column_method != 'hopach': row_method = 'average' ### needed due to PC errors
-            graphic_links = clustering.runHCexplicit(results_file, graphic_links, row_method, row_metric, column_method, column_metric, color_gradient, transpose, display=False, Normalize=True, JustShowTheseIDs=driver_genes)
+            if column_method != 'hopach': row_method = 'average' ### needed due to PC errors (possibly outside of LegacyMode)
+            graphic_links = clustering.runHCexplicit(results_file, graphic_links, row_method, row_metric, column_method, column_metric, color_gradient, transpose, display=False, Normalize=True, JustShowTheseIDs=guide_genes)
             if len(graphic_links)==0:
-                graphic_links = clustering.runHCexplicit(results_file, graphic_links, row_method, row_metric, column_method, column_metric, color_gradient, transpose, display=False, Normalize=True, JustShowTheseIDs=driver_genes)
+                graphic_links = clustering.runHCexplicit(results_file, graphic_links, row_method, row_metric, column_method, column_metric, color_gradient, transpose, display=False, Normalize=True, JustShowTheseIDs=guide_genes)
             cluster_file = string.replace(graphic_links[0][1],'.png','.txt')
         except Exception: pass
         #exportGroupsFromClusters(cluster_file,expFile,platform)
     #"""
     #filtered_file = export.findParentDir(expFile)+'/amplify/'+export.findFilename(expFile)
-    #graphic_links = [(1,'/Users/saljh8/Desktop/Mouse_organoid/ExpressionInput/SamplePrediction/DataPlots/Clustering-nature14966-s6-CORRELATED-FEATURES-hierarchical_cosine_correlation.png')]
-    #graphic_links = [(1,'/Users/saljh8/Desktop/dataAnalysis/Mm_Kiddney_tubual/ExpressionInput/SamplePrediction/DataPlots/DataPlots/Clustering-E15.5_Adult_IRI Data-output-CORRELATED-FEATURES-clean-hierarchical_cosine_correlation.png')]
+    #graphic_links = [(1,'/Users/saljh8/Desktop/Grimes/KashishNormalization/test/ExpressionInput/SamplePrediction/DataPlots/Clustering-CombinedSingleCell_March_15_2015-CORRELATED-FEATURES-hierarchical_cosine_euclidean.txt')]
 
     try: graphic_links,new_results_file = correlateClusteredGenes(platform,graphic_links[-1][-1][:-4]+'.txt',numSamplesClustered=samplesDiffering,excludeCellCycle=excludeCellCycle,graphics=graphic_links,ColumnMethod=column_method)
     except Exception: print traceback.format_exc()
         
     row_metric = 'correlation'; row_method = 'hopach'
-    column_metric = 'cosine'
-    #column_method = 'hopach'
+    #column_metric = 'cosine'
+    #if LegacyMode: column_method = 'hopach'
 
+    cellCycleRemove1=[]; cellCycleRemove2=[]
     try:
-        newDriverGenes1 = correlateClusteredGenes(platform,graphic_links[-1][-1][:-4]+'.txt',stringency='strict',numSamplesClustered=samplesDiffering,excludeCellCycle=excludeCellCycle,ColumnMethod=column_method)
-        newDriverGenes1_str = 'G1 '+string.join(newDriverGenes1.keys(),' ')+' amplify positive'
+        newDriverGenes1, cellCycleRemove1 = correlateClusteredGenes(platform,graphic_links[-1][-1][:-4]+'.txt',stringency='strict',numSamplesClustered=samplesDiffering,excludeCellCycle=excludeCellCycle,ColumnMethod=column_method)
+        newDriverGenes1_str = 'Guide1 '+string.join(newDriverGenes1.keys(),' ')+' amplify positive'
         parameters.setGeneSelection(newDriverGenes1_str) ### force correlation to these targetGenes
         parameters.setGeneSet('None Selected') ### silence this
         parameters.setPathwaySelect('None Selected')
         if column_method != 'hopach': row_method = 'average' ### needed due to PC errors
         graphic_links = clustering.runHCexplicit(filtered_file, graphic_links, row_method, row_metric, column_method, column_metric, color_gradient, parameters, display=False, Normalize=True)
         
-        newDriverGenes2 = correlateClusteredGenes(platform,graphic_links[-1][-1][:-4]+'.txt',stringency='strict',numSamplesClustered=samplesDiffering,excludeCellCycle=excludeCellCycle,ColumnMethod=column_method)
-        newDriverGenes2_str = 'G2 '+string.join(newDriverGenes2.keys(),' ')+' amplify positive'
+        newDriverGenes2, cellCycleRemove2 = correlateClusteredGenes(platform,graphic_links[-1][-1][:-4]+'.txt',stringency='strict',numSamplesClustered=samplesDiffering,excludeCellCycle=excludeCellCycle,ColumnMethod=column_method)
+        newDriverGenes2_str = 'Guide2 '+string.join(newDriverGenes2.keys(),' ')+' amplify positive'
         parameters.setGeneSelection(newDriverGenes2_str) ### force correlation to these targetGenes
         parameters.setGeneSet('None Selected') ### silence this
         parameters.setPathwaySelect('None Selected')
         graphic_links = clustering.runHCexplicit(filtered_file, graphic_links, row_method, row_metric, column_method, column_metric, color_gradient, parameters, display=False, Normalize=True)
         newDriverGenes3 = unique.unique(newDriverGenes1.keys()+newDriverGenes2.keys())
-        newDriverGenes3_str = 'G3 '+string.join(newDriverGenes3,' ')+' amplify positive'
+        cellCycleRemove=cellCycleRemove1+cellCycleRemove2 ### It is possible for a cell cycle guide-gene to be reported in both guide1 and 2, but only as cell cycle associated in one of them
+        newDriverGenes3_filtered=[]
+        for i in newDriverGenes3:
+            if not i in cellCycleRemove:
+                newDriverGenes3_filtered.append(i)
+        newDriverGenes3_str = 'Guide3 '+string.join(newDriverGenes3_filtered,' ')+' amplify positive'
         parameters.setGeneSelection(newDriverGenes3_str)
-        try: parameters.setClusterGOElite('BioMarkers')
-        except Exception: pass
+        try:
+            parameters.setClusterGOElite('BioMarkers')
+            """
+            if species == 'Mm' or species == 'Hs' or species == 'Rn':
+                parameters.setClusterGOElite('BioMarkers')
+            else:
+                parameters.setClusterGOElite('GeneOntology')
+            """
+        except Exception, e: 
+            print e
         graphic_links = clustering.runHCexplicit(filtered_file, graphic_links, row_method, row_metric, column_method, column_metric, color_gradient, parameters, display=False, Normalize=True)
     except Exception:
         print traceback.format_exc()
@@ -3362,7 +3505,10 @@ def findCommonExpressionProfles(expFile,species,platform,expressed_uids,driver_g
     return graphic_links
 
 def copyICGSfiles(expFile,graphic_links):
-    root_dir = string.split(expFile,'ExpressionInput')[0]
+    if 'ExpressionInput' in expFile:
+        root_dir = string.split(expFile,'ExpressionInput')[0]
+    else:
+        root_dir = string.split(expFile,'AltResults')[0]
     import shutil
     destination_folder = root_dir+'/ICGS'
     try: os.mkdir(destination_folder)
@@ -3396,7 +3542,7 @@ def numpyCorrelationMatrix(x,rows,gene):
     for score_ls in D1:
         for v in score_ls:
             scores.append(v)
-    return statistics.avg(scores)
+    return numpy.average(scores)
 
 def numpyCorrelationMatrixCount(x,rows,cutoff=0.4,geneTypeReport=None):
     ### Find which genes are most correlated
@@ -3490,10 +3636,11 @@ def writeFilteredFile(results_file,platform,headers,gene_to_symbol_db,expressed_
         headers = string.join(headers,'\t')+'\n'
         headers = string.replace(headers,'row_clusters-flat','UID')
     eo.write(headers)
-    keep=[]
+    keep=[]; sort_genes=False
     e=0
     if len(atleast_10)==0:
         atleast_10 = expressed_values
+        sort_genes = True
     for i in atleast_10:
         if i in gene_to_symbol_db:
             symbol = gene_to_symbol_db[i][0]
@@ -3501,8 +3648,10 @@ def writeFilteredFile(results_file,platform,headers,gene_to_symbol_db,expressed_
         if i not in excludeGenes and symbol not in excludeGenes:
             if i not in keep:
                 keep.append((symbol,i))
-    keep.sort(); keep.reverse()
     
+    if sort_genes:
+        keep.sort(); keep.reverse()
+        
     for (symbol,i) in keep:
         """
         if platform == 'RNASeq':
@@ -3517,7 +3666,7 @@ def writeFilteredFile(results_file,platform,headers,gene_to_symbol_db,expressed_
 def remoteGetDriverGenes(Species,platform,results_file,numSamplesClustered=3,excludeCellCycle=False,ColumnMethod='hopach'):
     global species
     species = Species
-    guideGenes = correlateClusteredGenes(platform,results_file,stringency='strict',excludeCellCycle=excludeCellCycle,ColumnMethod=ColumnMethod)
+    guideGenes, cellCycleRemove = correlateClusteredGenes(platform,results_file,stringency='strict',excludeCellCycle=excludeCellCycle,ColumnMethod=ColumnMethod)
     guideGenes = string.join(guideGenes.keys(),' ')+' amplify positive'
     return guideGenes
     
@@ -3535,31 +3684,32 @@ def correlateClusteredGenes(platform,results_file,stringency='medium',numSamples
         highVarHighComplexity, column_header = correlateClusteredGenesParameters(results_file,rho_cutoff=0.2,hits_cutoff=1,hits_to_report=6,filter=True,numSamplesClustered=numSamplesClustered)
         #combined_results = dict(medVarLowComplexity.items() + medVarLowComplexity.items() + highVarLowComplexity.items() + highVarHighComplexity.items())
         combined_results={}
+        
         for i in medVarLowComplexity: combined_results[i]=[]
         for i in medVarHighComplexity: combined_results[i]=[]
         for i in highVarLowComplexity: combined_results[i]=[]
         for i in highVarHighComplexity: combined_results[i]=[]
         #combined_results = highVarHighComplexity
     if stringency == 'strict':
-        medVarLowComplexity, column_header = correlateClusteredGenesParameters(results_file,rho_cutoff=0.3,hits_cutoff=4,hits_to_report=50000,filter=True,numSamplesClustered=numSamplesClustered)
-        medVarHighComplexity, column_header = correlateClusteredGenesParameters(results_file,rho_cutoff=0.1,hits_cutoff=4,hits_to_report=50000,filter=True,numSamplesClustered=numSamplesClustered) #hits_cutoff=6
-        highVarLowComplexity, column_header = correlateClusteredGenesParameters(results_file,rho_cutoff=0.5,hits_cutoff=3,hits_to_report=50000,filter=True,numSamplesClustered=numSamplesClustered)
-        highVarHighComplexity, column_header = correlateClusteredGenesParameters(results_file,rho_cutoff=0.3,hits_cutoff=3,hits_to_report=50000,filter=True,numSamplesClustered=numSamplesClustered)
+        medVarLowComplexity, column_header = correlateClusteredGenesParameters(results_file,rho_cutoff=0.3,hits_cutoff=4,hits_to_report=50,filter=True,numSamplesClustered=numSamplesClustered)
+        medVarHighComplexity, column_header = correlateClusteredGenesParameters(results_file,rho_cutoff=0.1,hits_cutoff=4,hits_to_report=50,filter=True,numSamplesClustered=numSamplesClustered) #hits_cutoff=6
+        highVarLowComplexity, column_header = correlateClusteredGenesParameters(results_file,rho_cutoff=0.5,hits_cutoff=3,hits_to_report=50,filter=True,numSamplesClustered=numSamplesClustered)
+        highVarHighComplexity, column_header = correlateClusteredGenesParameters(results_file,rho_cutoff=0.3,hits_cutoff=3,hits_to_report=50,filter=True,numSamplesClustered=numSamplesClustered)
         #combined_results = dict(medVarLowComplexity.items() + medVarLowComplexity.items() + highVarLowComplexity.items() + highVarHighComplexity.items())
         combined_results={}
         for i in medVarLowComplexity: combined_results[i]=[]
         for i in medVarHighComplexity: combined_results[i]=[]
         for i in highVarLowComplexity: combined_results[i]=[]
         for i in highVarHighComplexity: combined_results[i]=[]
-        guideGenes = correlateClusteredGenesParameters(results_file,rho_cutoff=rhoCuttOff,hits_cutoff=0,hits_to_report=1,geneFilter=combined_results,excludeCellCycle=excludeCellCycle)
+        guideGenes, addition_cell_cycle_associated = correlateClusteredGenesParameters(results_file,rho_cutoff=rhoCuttOff,hits_cutoff=0,hits_to_report=1,geneFilter=combined_results,excludeCellCycle=excludeCellCycle)
         if guideGenes == 'TooFewBlocks':
-            guideGenes = correlateClusteredGenesParameters(results_file,rho_cutoff=rhoCuttOff+0.1,hits_cutoff=0,hits_to_report=1,geneFilter=combined_results,excludeCellCycle=excludeCellCycle)
+            guideGenes, addition_cell_cycle_associated = correlateClusteredGenesParameters(results_file,rho_cutoff=rhoCuttOff+0.1,hits_cutoff=0,hits_to_report=1,geneFilter=combined_results,excludeCellCycle=excludeCellCycle)
             if guideGenes == 'TooFewBlocks':
-                guideGenes = correlateClusteredGenesParameters(results_file,rho_cutoff=rhoCuttOff+0.2,hits_cutoff=0,hits_to_report=1,geneFilter=combined_results,excludeCellCycle=excludeCellCycle,forceOutput=True)
+                guideGenes, addition_cell_cycle_associated = correlateClusteredGenesParameters(results_file,rho_cutoff=rhoCuttOff+0.2,hits_cutoff=0,hits_to_report=1,geneFilter=combined_results,excludeCellCycle=excludeCellCycle,forceOutput=True)
         if len(guideGenes)>200:
             print 'Too many drivers (>200)... performing more stringent filtering...'
-            guideGenes = correlateClusteredGenesParameters(results_file,rho_cutoff=0.1,hits_cutoff=0,hits_to_report=1,geneFilter=combined_results,excludeCellCycle=excludeCellCycle,restrictTFs=True)
-        return guideGenes
+            guideGenes, addition_cell_cycle_associated = correlateClusteredGenesParameters(results_file,rho_cutoff=0.1,hits_cutoff=0,hits_to_report=1,geneFilter=combined_results,excludeCellCycle=excludeCellCycle,restrictTFs=True)
+        return guideGenes, addition_cell_cycle_associated
     #B4galt6, Prom1
     for tuple_ls in combined_results:
         data_length = len(tuple_ls);break
@@ -3588,18 +3738,19 @@ def correlateClusteredGenes(platform,results_file,stringency='medium',numSamples
         if platform == 'exons': color_gradient = 'yellow_black_blue'
         transpose = False
         try:
-            len(driver_genes)
+            len(guide_genes)
         except Exception:
-            driver_genes = []
+            guide_genes = []
  
-        graphics = clustering.runHCexplicit(new_results_file, graphics, row_method, row_metric, column_method, column_metric, color_gradient, transpose, display=False, Normalize=True, JustShowTheseIDs=driver_genes)
+        graphics = clustering.runHCexplicit(new_results_file, graphics, row_method, row_metric, column_method, column_metric, color_gradient, transpose, display=False, Normalize=True, JustShowTheseIDs=guide_genes)
         cluster_file = string.replace(graphics[0][1],'.png','.txt')
         #exportGroupsFromClusters(cluster_file,expFile,platform)
     return graphics, new_results_file
         
 def correlateClusteredGenesParameters(results_file,rho_cutoff=0.3,hits_cutoff=4,hits_to_report=5,filter=False,geneFilter=None,numSamplesClustered=3,excludeCellCycle=False,restrictTFs=False,forceOutput=False):
     import clustering
-   
+    addition_cell_cycle_associated=[]
+    
     if geneFilter != None:
         geneFilter_db={}
         for i in geneFilter:
@@ -3645,9 +3796,9 @@ def correlateClusteredGenesParameters(results_file,rho_cutoff=0.3,hits_cutoff=4,
             #if row_header[i] == 'Pax6': print [block],row_header[i-1],rho,rho_cutoff
             """
             try:
-                if row_header[i] in driver_genes: print row_header[i], rho
-                if row_header[i-1] in driver_genes: print row_header[i-1], rho
-                if row_header[i+1] in driver_genes: print row_header[i+1], rho
+                if row_header[i] in guide_genes: print row_header[i], rho
+                if row_header[i-1] in guide_genes: print row_header[i-1], rho
+                if row_header[i+1] in guide_genes: print row_header[i+1], rho
             except Exception:
                 pass
             """
@@ -3667,10 +3818,9 @@ def correlateClusteredGenesParameters(results_file,rho_cutoff=0.3,hits_cutoff=4,
             block_db[block] = [i] ### store the row index
         i+=1
 
-
     if hits_to_report == 1:
         if len(block_db)<4 and forceOutput==False:
-            return 'TooFewBlocks'
+            return 'TooFewBlocks', None
         guideGenes={}
         ### Select the top TFs or non-TFs with the most gene correlations
         for b in block_db:
@@ -3694,16 +3844,16 @@ def correlateClusteredGenesParameters(results_file,rho_cutoff=0.3,hits_cutoff=4,
                                 tf_count+=1
                 if len(tfs)==0:
                     gene = corr_counts_gene[-1][-1]
-                    if gene not in cell_cycle:
+                    if gene in cell_cycle and LegacyMode: pass
+                    else:
                         guideGenes[gene]=[]
                 #block_db[b]= [corr_counts_gene[-1][-1]] ### save just the selected gene indexes
         
-        ### Additional filter to remove drivers that will bring in cell cycle genes (the more drivers the more likely)
+        ### Additional filter to remove guides that will bring in cell cycle genes (the more guides the more likely)
         if excludeCellCycle == 'strict':
-            #print 'drivers',len(guideGenes)
+            #print 'guides',len(guideGenes)
             guideCorrelated = numpyCorrelationMatrixGeneAlt(matrix,row_header,guideGenes,gene_to_symbol_db,rho_cutoff)
             guideGenes={}
-            addition_cell_cycle_associated=[]
             for gene in guideCorrelated:
                 cell_cycle_count=[]
                 for corr_gene in guideCorrelated[gene]:
@@ -3717,11 +3867,11 @@ def correlateClusteredGenesParameters(results_file,rho_cutoff=0.3,hits_cutoff=4,
                     guideGenes[gene]=[]
             print 'additional Cell Cycle guide genes removed:',addition_cell_cycle_associated
         print len(guideGenes), 'novel guide genes discovered:', guideGenes.keys()
-        return guideGenes
+        return guideGenes,addition_cell_cycle_associated
         
     def greaterThan(x,results_file,numSamplesClustered):
         if 'alt_junctions' not in results_file and Platform == None:
-            if x>(numSamplesClustered-0): return 1
+            if x>(numSamplesClustered-1): return 1
             else: return 0
         else:
             return 1
@@ -3753,7 +3903,6 @@ def correlateClusteredGenesParameters(results_file,rho_cutoff=0.3,hits_cutoff=4,
                         new_indexes.append(index)
                         """
                         vs.sort()
-                        #if row_header[i] == 'Irf8': print vs[-5]-vs[5]
                         try:
                             if abs(vs[-5]-vs[5])>6: new_indexes.append(index)
                         except Exception:
@@ -3799,7 +3948,7 @@ def exportGroupsFromClusters(cluster_file,expFile,platform):
         if platform == 'RNASeq':
             if 'junction_quantification' not in name and '.bed' not in name:
                 name = name+'.bed'
-            elif 'junction_quantification.txt' not in name and '.txt' not in name:
+            elif 'junction_quantification.txt' not in name and '.txt' not in name and '.bed' not in name:
                 name = name+'.txt'
         if ':' in name:
             name = string.split(name,':')[1]
@@ -4460,6 +4609,7 @@ def runKallisto(species,dataset_name,root_dir,fastq_folder,returnSampleNames=Fal
         kallisto_file = kallisto_dir + 'Mac/bin/kallisto'; plat = 'MacOSX'
     elif 'linux' in sys.platform:
         kallisto_file = kallisto_dir + '/Linux/bin/kallisto'; plat = 'linux'
+    print 'Using',kallisto_file
     kallisto_file = filepath(kallisto_file)
     kallisto_root = string.split(kallisto_file,'bin/kallisto')[0]
     fn = filepath(kallisto_file)
@@ -4494,7 +4644,7 @@ def runKallisto(species,dataset_name,root_dir,fastq_folder,returnSampleNames=Fal
             print 'Building kallisto index file...'
             try: retcode = subprocess.call([kallisto_file, "index","-i", kallisto_root+species, fasta_file])
             except Exception:
-                print traceback.format_exc();sys.exit()
+                print traceback.format_exc()
                 ### If installed globally
                 retcode = subprocess.call(['kallisto', "index","-i", kallisto_root+species, fasta_file])
     
@@ -4518,11 +4668,21 @@ def runKallisto(species,dataset_name,root_dir,fastq_folder,returnSampleNames=Fal
             except Exception:
                 retcode = subprocess.call(['kallisto', "quant","-i", indexFile, "-o", output_path]+p)
         else:
-            try: retcode = subprocess.call([kallisto_file, "quant","-i", indexFile, "-o", output_path,"--single","-l","200","-s","20"]+p)
-            except Exception:
-                retcode = subprocess.call(['kallisto', "quant","-i", indexFile, "-o", output_path,"--single","-l","200","-s","20"]+p)
+            if os.name == 'nt':
+                try:
+                    try: retcode = subprocess.call([kallisto_file, "quant","-i", indexFile, "-o", output_path,"--single","-l","200"]+p)
+                    except Exception: retcode = subprocess.call([kallisto_file, "quant","-i", indexFile, "-o", output_path,"--single","-l","200","-s","20"]+p)
+                except Exception:
+                    try: retcode = subprocess.call(['kallisto', "quant","-i", indexFile, "-o", output_path,"--single","-l","200"]+p)
+                    except Exception:
+                        retcode = subprocess.call(['kallisto', "quant","-i", indexFile, "-o", output_path,"--single","-l","200","-s","20"]+p)
+            else:
+                try: retcode = subprocess.call([kallisto_file, "quant","-i", indexFile, "-o", output_path,"--single","-l","200","-s","20"]+p)
+                except Exception:
+                    retcode = subprocess.call(['kallisto', "quant","-i", indexFile, "-o", output_path,"--single","-l","200","-s","20"]+p)
         if retcode == 0: print 'completed in', int(time.time()-begin_time), 'seconds'
         else: print 'kallisto failed due to an unknown error (report to altanalyze.org help).'
+
         #"""
         input_path = output_path+'/abundance.txt'
         try:
@@ -4570,7 +4730,10 @@ def runKallisto(species,dataset_name,root_dir,fastq_folder,returnSampleNames=Fal
     
 def calculateGeneTPMs(species,expMatrix):
     import gene_associations
-    try: gene_to_transcript_db = gene_associations.getGeneToUid(species,('hide','Ensembl-EnsTranscript'))
+    try:
+        gene_to_transcript_db = gene_associations.getGeneToUid(species,('hide','Ensembl-EnsTranscript'))
+        if len(gene_to_transcript_db)==0:
+            kill
     except Exception:
         try:
             print 'Missing transcript-to-gene associations... downloading from Ensembl.'
@@ -4721,11 +4884,26 @@ def getFASTAFile(species):
     return fasta_file
 
 if __name__ == '__main__':
-    filename = '/Volumes/SEQ-DATA/PCBC-new/ReNormalized/counts.C4-steady-state.txt'
+    
+    species='Hs'; platform = "3'array"; vendor = "3'array"
+    import UI; import multiprocessing as mlp
+    gsp = UI.GeneSelectionParameters(species,platform,vendor)
+    gsp.setGeneSet('None Selected')
+    gsp.setPathwaySelect('')
+    gsp.setGeneSelection('')
+    gsp.setJustShowTheseIDs('')
+    gsp.setNormalize('median')
+    gsp.setSampleDiscoveryParameters(1,50,4,4,
+        True,'gene','protein_coding',False,'cosine','hopach',0.4)
+    #expFile = '/Users/saljh8/Desktop/Grimes/KashishNormalization/test/Original/ExpressionInput/exp.CombinedSingleCell_March_15_2015.txt'
+    expFile = '/Volumes/My Passport/salomonis2/SRP042161_GBM-single-cell/bams/ExpressionInput/exp.GBM_scRNA-Seq-steady-state.txt'
+    #singleCellRNASeqWorkflow('Hs', "RNASeq", expFile, mlp, parameters=gsp);sys.exit()
+    
+    filename = '/Users/saljh8/Downloads/counts.GSE81682_HTSeq.txt'
     #fastRPKMCalculate(filename);sys.exit()
-    calculateRPKMsFromGeneCounts(filename,'Hs');sys.exit()
+    calculateRPKMsFromGeneCounts(filename,'Mm',AdjustExpression=False);sys.exit()
     #copyICGSfiles('','');sys.exit()
-    runKallisto('Mm','test','/Users/saljh8/Desktop/dataAnalysis/grimes_fastq/test','/Users/saljh8/Desktop/dataAnalysis/grimes_fastq/test');sys.exit()
+    runKallisto('Dr','Etv2 GFP Single Cell','/Volumes/Seagate Exp/Single Cell RNA seq Run 1696 FASTQ','/Volumes/Seagate Exp/');sys.exit()
     import multiprocessing as mlp
     import UI
     species='Mm'; platform = "3'array"; vendor = 'Ensembl'
@@ -4735,28 +4913,29 @@ if __name__ == '__main__':
     gsp.setGeneSelection('')
     gsp.setJustShowTheseIDs('')
     gsp.setNormalize('median')
-    gsp.setSampleDiscoveryParameters(0,0,0,6,
-        True,'AltExon','protein_coding',False,'cosine','hopach',0.1)
+    gsp.setSampleDiscoveryParameters(0,0,1.5,3,
+        False,'AltExon','protein_coding',False,'cosine','hopach',0.35)
     
     #gsp.setSampleDiscoveryParameters(1,1,4,3, True,'Gene','protein_coding',False,'cosine','hopach',0.5)
     filename = '/Volumes/SEQ-DATA/AML_junction/AltResults/AlternativeOutput/Hs_RNASeq_top_alt_junctions-PSI-clust.txt'
     #fastRPKMCalculate(filename);sys.exit()
     results_file = '/Volumes/SEQ-DATA/Grimes/14018_gmp-pro/ExpressionInput/DataPlots/400 fold for at least 4 samples/Clustering-myeloblast-steady-state-correlated-features-hierarchical_euclidean_cosine-hopach.txt'
-    driverFile = '/Volumes/SEQ-DATA/Grimes/14018_gmp-pro/ExpressionInput/drivingTFs-symbol.txt'
+    guideGeneFile = '/Volumes/SEQ-DATA/Grimes/14018_gmp-pro/ExpressionInput/drivingTFs-symbol.txt'
 
     expFile = '/Users/saljh8/Desktop/Grimes/KashishNormalization/3-25-2015/ExpressionInput/exp.CombinedSingleCell_March_15_2015.txt'
     expFile = '/Users/saljh8/Desktop/dataAnalysis/Mm_Kiddney_tubual/ExpressionInput/exp.E15.5_Adult_IRI Data-output.txt'
     expFile = '/Users/saljh8/Desktop/PCBC_MetaData_Comparisons/temp/C4Meth450-filtered-SC-3_regulated.txt'
     expFile = '/Volumes/SEQ-DATA/Grimeslab/TopHat/AltResults/AlternativeOutput/Mm_RNASeq_top_alt_junctions-PSI-clust-filter.txt'
-    #expFile = '/Users/saljh8/Desktop/Mouse_organoid/ExpressionInput/exp.nature14966-s6.txt'
+    expFile = '/Users/saljh8/Documents/Leucegene_TargetPSIFiles/exp.TArget_psi_noif_uncorr_03-50missing-12high.txt'
+    expFile = '/Volumes/BOZEMAN2015/Hs_RNASeq_top_alt_junctions-PSI-clust-filter.txt'
 
-    singleCellRNASeqWorkflow('Mm', "exons", expFile, mlp, exp_threshold=0, rpkm_threshold=0, parameters=gsp);sys.exit()
+    singleCellRNASeqWorkflow('Hs', "exons", expFile, mlp, exp_threshold=0, rpkm_threshold=0, parameters=gsp);sys.exit()
     
     #expFile = '/Users/saljh8/Desktop/Grimes/AltSplice/Gmp-cluster-filter.txt'
     #singleCellRNASeqWorkflow('Mm', "exons", expFile, mlp, exp_threshold=0, rpkm_threshold=0, parameters=gsp);sys.exit()
     #expFile = '/Users/saljh8/Downloads/methylation/ExpressionInput/exp.female-steady-state.txt'
     
-    #singleCellRNASeqWorkflow('Hs', 'RNASeq', expFile, mlp, exp_threshold=50, rpkm_threshold=5) # drivers=driverFile)
+    #singleCellRNASeqWorkflow('Hs', 'RNASeq', expFile, mlp, exp_threshold=50, rpkm_threshold=5) # drivers=guideGeneFile)
     #sys.exit()
     #correlateClusteredGenes(results_file);sys.exit()
     #reformatExonFile('Hs','exon',True);sys.exit()

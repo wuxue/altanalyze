@@ -5,29 +5,78 @@ import random
 import copy
 import os
 import os.path
+import unique
 R_present=True
 
 try:
-    from rpy import r
-    print "\n---------Using RPY---------\n"
+    ### If file is present use this location
+    loc = unique.filepath('Config/R_location.txt')
+    s = open(loc,'r')
+    useStaticLocation=s.read()
+    #print useStaticLocation
+    #print 'Using the Config designated location'
 except Exception:
+    #print 'NOT using the Config designated location'
+    useStaticLocation = False
+    
+try:
+    forceError ### This doesn't currently work with the compiled version of AltAnalyz
+    import rpy2.robjects as robjects
+    r = robjects.r
+    print "\n---------Using RPY2---------\n"  
+except Exception:
+    from pyper import *
+    #print "\n---------Using PypeR---------\n"
+    ### Running the wrong one once is fine, but multiple times causes it to stall in a single session
     try:
-        from pyper import *
-        #print "\n---------Using PypeR---------\n"
-        r = R(use_numpy=True)
+        try:
+            if 'Xdarwin' in sys.platform:
+                #print 'Using AltAnalyze local version of R'
+                #print 'A'
+                path = unique.filepath("AltDatabase/tools/R/Mac/R")
+                r = R(RCMD=path,use_numpy=True)
+            elif os.name == 'nt':
+                path = unique.filepath("AltDatabase/tools/R/PC/bin/x64/R.exe")
+                r = R(RCMD=path,use_numpy=True)    
+            else:
+                #print 'B'
+                if useStaticLocation == False or useStaticLocation=='no':
+                    print 'NOT using static location'
+                    r = R(use_numpy=True)
+                else:
+                    print 'Using static location'
+                    path = '/usr/local/bin/R'
+                    if os.path.exists(path): pass
+                    else:
+                        path = '/usr/bin/R'
+                    if os.path.exists(path):
+                        print 'Using the R path:',path
+                        r = R(RCMD=path,use_numpy=True)
+                    else:
+                        r = None
+                        R_present=False
+                        print 'R does not appear to be installed... Please install first.'
+        except Exception:
+            #print 'C'
+            r = R(use_numpy=True)
+
     except Exception:
+        #print traceback.format_exc()
         r = None
         R_present=False
         pass
-
+    
+LegacyMode = True
 ### Create a Directory for R packages in the AltAnalyze program directory (in non-existant)
 r_package_path = string.replace(os.getcwd()+'/Config/R','\\','/') ### R doesn't link \\
+r_package_path = unique.filepath(r_package_path) ### Remove the AltAnalyze.app location
 try: os.mkdir(r_package_path)
 except Exception: None
 
-### Set an R-package installation path
-command = '.libPaths("'+r_package_path+'")'; r(command) ### doesn't work with %s for some reason
-#print_out = r('.libPaths()');print print_out; sys.exit()
+if R_present:
+    ### Set an R-package installation path
+    command = '.libPaths("'+r_package_path+'")'; r(command) ### doesn't work with %s for some reason
+    #print_out = r('.libPaths()');print print_out; sys.exit()
 
 def remoteMonocle(input_file,expPercent,pval,numGroups):
     #input_file="Altanalyze" 
@@ -78,7 +127,10 @@ def checkForDuplicateIDs(input_file):
         data = cleanUpLine(line)
         t = string.split(data,'\t')
         if first_row == True:
-            if 'row_clusters-flat' in t and 'row_clusters-flat' not in t[0]:
+            if ('row_clusters-flat' in t and 'row_clusters-flat' not in t[0]):
+                headers = string.join(['uid']+t[2:],'\t')+'\n'
+                offset = 1
+            elif '-filtered.txt' in fn and ".R2." in t[1] and LegacyMode:
                 headers = string.join(['uid']+t[2:],'\t')+'\n'
                 offset = 1
             else:
@@ -117,7 +169,7 @@ def checkForDuplicateIDs(input_file):
             key_db[key]=s
             
     if len(key_db) != len(key_list) or offset>0 or nonNumericsPresent:
-        print 'Duplicate IDs present... writing a cleaned-up version of the input file:'
+        print 'Writing a cleaned-up version of the input file:'
         ### Duplicate IDs present
         input_file = input_file[:-4]+'-clean.txt'
         export_text = export.ExportFile(input_file) ### create a new input file
@@ -137,6 +189,7 @@ def importHopachOutput(filename):
     hopach_clusters=[]
     cluster_level=[]
     cluster_level2=[]
+    cluster_level3=[]
     hopach_db={}
     cluster_db={}
     level2_level1={}
@@ -146,28 +199,42 @@ def importHopachOutput(filename):
         data = cleanUpLine(line)
         if firstLine: firstLine = False
         else:
+            t = string.split(data,'\t')
+            final_level_order = int(t[-1])
             index, uid, cluster_number, cluster_label, cluster_level_order, final_label, final_level_order = string.split(data,'\t')
             try: l2 = str(int(round(float(cluster_label),0)))[:2]
             except Exception: l2 = int(cluster_label[0])
+            try: l3 = str(int(round(float(cluster_label),0)))[:3]
+            except Exception: l3 = int(cluster_label[0])
             hopach_clusters.append((int(final_level_order),int(index)-1)) ### Need to order according to the original index, sorted by the clustered order
             cluster_level.append(int(cluster_label[0])) ### This is the root cluster number
             cluster_level2.append(l2) ### Additional cluster levels
+            cluster_level3.append(l3)
             hopach_db[uid] = cluster_label
             level2_level1[l2] = int(cluster_label[0])
+            level2_level1[l3] = int(cluster_label[0])
             try: cluster_db[int(float(cluster_label[0]))].append(uid)
             except Exception: cluster_db[int(cluster_label[0])] = [uid]
             try: cluster_db[l2].append(uid)
             except Exception: cluster_db[l2] = [uid]
-           
-    split_cluster=[] 
+            try: cluster_db[l3].append(uid)
+            except Exception: cluster_db[l3] = [uid]
+        
+    split_cluster=[]
+    if 'column' in fn:
+        cluster_limit = 50 ### typically less columns than rows
+    else:
+        cluster_limit = 75
     for cluster in cluster_db:
         #print cluster,len(cluster_db[cluster]),(float(len(cluster_db[cluster]))/len(hopach_db))
-        if len(cluster_db[cluster])>100 and (float(len(cluster_db[cluster]))/len(hopach_db))>0.3:
+        if len(cluster_db[cluster])>cluster_limit and (float(len(cluster_db[cluster]))/len(hopach_db))>0.2:
             #print cluster
             if cluster<10:
                 split_cluster.append(cluster)
     import unique
     levels1 = unique.unique(cluster_level)
+    already_split={}
+    updated_indexes={}
     if len(split_cluster)>0:
         print 'Splitting large hopach clusters:',split_cluster
         i=0
@@ -175,8 +242,23 @@ def importHopachOutput(filename):
             l1 = level2_level1[l2]
             if l1 in split_cluster:
                 cluster_level[i] = l2
+                try:
+                    l2_db = already_split[l1]
+                    l2_db[l2]=[]
+                except Exception: already_split[l1] = {l2:[]}
             i+=1
-        
+        ### Check and see if the l1 was split or not (might need 3 levels)
+        i=0
+        for l3 in cluster_level3:
+            l1 = level2_level1[l3]
+            if l1 in already_split:
+                #l1_members = len(cluster_db[l1])
+                l2_members = len(already_split[l1])
+                #print l1, l3, l1_members, l2_members
+                if l2_members == 1: ### Thus, not split
+                    cluster_level[i] = l3
+                    #print l1, l3, 'split'
+            i+=1
     else:
         if len(cluster_level) > 50: ### Decide to use different hopach levels
             if len(levels1)<3:
@@ -185,32 +267,29 @@ def importHopachOutput(filename):
             if len(levels1)<4:
                 cluster_level = cluster_level2
                 
-    cluster_level2 = [] ### The cluster colors don't segregate unless the cluster numbers are on the same scale (same string length)
-    max_clust_len = max(map(lambda x: len(str(x)),cluster_level))
-    for i in cluster_level:
-        i = str(i)
-        if len(i)!=max_clust_len:
-            i+=(max_clust_len-len(i))*'0'
-            cluster_level2.append(i)
-        else: cluster_level2.append(i)
-    cluster_level = cluster_level2
-    
     hopach_clusters.sort()
     hopach_clusters = map(lambda x: x[1], hopach_clusters) ### Store the original file indexes in order based the cluster final order
     
     ### Change the cluster_levels from non-integers to integers for ICGS comparison group simplicity and better coloring of the color bar
     cluster_level2 = []
-    cluster_index_db={}
-    index = 1
+    ### Rename the sorted cluster IDs as integers
+    cluster_level_sort = []
+    for i in cluster_level:
+        if str(i) not in cluster_level_sort:
+            cluster_level_sort.append(str(i))
+        cluster_level2.append(str(i))
+    cluster_level_sort.sort()
+    cluster_level = cluster_level2
+    cluster_level2=[]
+    i=1; cluster_conversion={}
+    for c in cluster_level_sort:
+        cluster_conversion[str(c)] = str(i)
+        i+=1
+        
     for c in cluster_level:
-        if c not in cluster_index_db:
-            cluster_index_db[c]=str(index)
-            new_cluster_id = index
-            index+=1
-        else:
-            new_cluster_id = cluster_index_db[c]
-        cluster_level2.append(new_cluster_id)
+        cluster_level2.append(cluster_conversion[c])
 
+    #print string.join(map(str,cluster_level2),'\t');sys.exit()
     db['leaves'] = hopach_clusters ### This mimics Scipy's cluster output data structure
     db['level'] = cluster_level2
     return db
@@ -489,7 +568,6 @@ class RScripts:
         parse_line = 'data<-read.table(%s,sep="\t",as.is=T,row.names=1,header=T)' % filename
         checklinelengths(self._file)
         print_out = r(parse_line)
-        #print parse_line
         dat = r['data']
         #print "Number of columns in input file:",len(dat)
         print_out = r('data<-as.matrix(data)')
@@ -783,31 +861,28 @@ def CreateFilesMonocle(filename,rawExpressionFile,species='Hs'):
     export_object.close()
     print 'File written...'
     #return input_file
-
     
     array_names = []; array_linker_db = {}; d = 0; i = 0
     for entry in headers.split('\t'):
-                
-                entry=cleanUpLine(entry)
-                if '::' in entry:
-                    a = (entry.split("::"))
-                elif ':' in entry:
-                    a = (entry.split(":"))
-                else:
-                    a = (clusters[i],entry)
-                #entry=string.join(a,'.')
+        entry=cleanUpLine(entry)
+        if '::' in entry:
+            a = (entry.split("::"))
+        elif ':' in entry:
+            a = (entry.split(":"))
+        else:
+            a = (clusters[i],entry)
+        #entry=string.join(a,'.')
               
-                ent=entry+'\t'+a[0];
-                #if(ent[0].isdigit()):
-                #    ent='X'+ent[0:]
-                
-                #if '-' in ent:
-                 #   ent=string.replace(ent,'-','.')
-                #if '+' in ent:
-                 #   ent=string.replace(ent,'+','.')
-                    #print j
-                array_names.append(ent);
-                i+=1
+        ent=entry+'\t'+a[0];
+        #if(ent[0].isdigit()):
+        #    ent='X'+ent[0:]     
+        #if '-' in ent:
+            #   ent=string.replace(ent,'-','.')
+        #if '+' in ent:
+            #   ent=string.replace(ent,'+','.')
+            #print j
+        array_names.append(ent);
+        i+=1
         
     i=0
     eheader = string.join(['']+['Group'],'\t')+'\n' ### format column-flat-clusters for export
@@ -818,19 +893,22 @@ def CreateFilesMonocle(filename,rawExpressionFile,species='Hs'):
     export_cdt.close()
     gheader = string.join(['']+ ['gene_short_name'],'\t')+'\n' ### format column-flat-clusters for export
     export_gene.write(gheader)
-   
     for key in key_list:
+        proceed=False
+        ### The commented out code just introduces errors and is not needed - re-evaluate in the future if needed
+        """
         if key in gene_to_symbol:
-             symbol = gene_to_symbol[id][0]
-             if symbol in gene_list:
-                        nid = symbol
-                        proceed = True
-             if proceed:
-                    k=gene_list.index(nid)
-                    export_object.write(line)
-                    export_gene.write(id+'\n')
+            symbol = gene_to_symbol[key][0]
+            if symbol in gene_list:
+                nid = symbol
+                proceed = True
+            if proceed:
+                k=gene_list.index(nid)
+                export_object.write(line)
+                export_gene.write(key+'\n')
         else:
-            export_gene.write(key+'\t'+key+'\n')
+            export_gene.write(key+'\t'+key+'\n')"""
+        export_gene.write(key+'\t'+key+'\n')
  
             
     export_object.close() 

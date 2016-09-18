@@ -18,7 +18,11 @@ def filterFile(input_file,output_file,filter_names):
     firstLine = True
     for line in open(input_file,'rU').xreadlines():
         data = line.rstrip()
-        values = string.split(data,'\t')
+        data = string.replace(data,'"','')
+        if '.csv' in input_file:
+            values = string.split(data,',')
+        else:
+            values = string.split(data,'\t')
         if firstLine:
             if data[0]!='#':
                 sample_index_list = map(lambda x: values.index(x), filter_names)
@@ -67,10 +71,113 @@ def getFilters(filter_file):
         filter_list.append(sample)
     return filter_list
 
+"""" Filter a dataset based on number of genes with expression above the indicated threshold"""
+
+def statisticallyFilterFile(input_file,output_file,threshold):
+    if 'exp.' in input_file:
+        counts_file = string.replace(input_file,'exp.','geneCount.')
+    else:
+        counts_file = input_file[:-4]+'-geneCount.txt'
+    sample_expressed_genes={}
+    header=True
+    junction_max=[]
+    count_sum_array=[]
+    for line in open(input_file,'rU').xreadlines():
+        data = line.rstrip()
+        if '.csv' in input_file:
+            t = string.split(data,',')
+        else:
+            t = string.split(data,'\t')
+        if header:
+            samples = t[1:]
+            header=False
+            count_sum_array=[0]*len(samples)
+        else:
+            values = map(float,t[1:])
+            binarized_values = []
+            for v in values:
+                if v>threshold: binarized_values.append(1)
+                else: binarized_values.append(0)
+            count_sum_array = [sum(value) for value in zip(*[count_sum_array,binarized_values])]
+            
+    index=0
+    distribution=[]
+    count_sum_array_db={}
+    samples_to_retain =[]
+    samples_to_exclude = []
+    for sample in samples:
+        count_sum_array_db[sample] = count_sum_array[index]
+        distribution.append(count_sum_array[index])
+        index+=1
+    import statistics
+    distribution.sort()
+    avg = int(statistics.avg(distribution))
+    stdev = int(statistics.stdev(distribution))
+    min_exp = int(min(distribution))
+    cutoff = avg - (stdev*2)
+    dev = 2
+    print 'The average number of genes expressed above %s is %s, (SD is %s, min is %s)' % (threshold,avg,stdev,min_exp)
+    if cutoff<0:
+        if (stdev-avg)>0:
+            cutoff = avg - (stdev/2); dev = 0.5
+        else:
+            cutoff = avg - stdev; dev = 1
+    if min_exp>cutoff:
+        cutoff = avg - stdev; dev = 1
+    import export
+    eo = export.ExportFile(counts_file)
+    eo.write('Sample\tGenes Expressed(threshold:'+str(threshold)+')\n')
+    for sample in samples: ### keep the original order
+        if count_sum_array_db[sample]>cutoff:
+            samples_to_retain.append(sample)
+        else:
+            samples_to_exclude.append(sample)
+        eo.write(sample+'\t'+str(count_sum_array_db[sample])+'\n')
+        
+    eo.close()
+    print len(samples_to_exclude), 'samples removed (# exp. genes, < %d SD away) (%s)' % (dev,string.join(samples_to_exclude,', '))
+    print 'Exporting the filtered expression file to:'
+    print output_file
+    filterFile(input_file,output_file,samples_to_retain)
+
+def combineDropSeq(input_dir):
+    import unique
+    files = unique.read_directory(input_dir)
+    combinedGeneExpression={}
+    for input_file in files: #:70895507-70895600
+        header=True
+        if '.txt' in input_file:
+            for line in open(input_dir+'/'+input_file,'rU').xreadlines():
+                data = line.rstrip()
+                t = string.split(data,'\t')
+                if header:
+                    header_row = line
+                    samples = t[1:]
+                    header=False
+                else:
+                    values = map(float,t[1:])
+                    gene = t[0]
+                    if gene in combinedGeneExpression:
+                        prior_values = combinedGeneExpression[gene]
+                        count_sum_array = [sum(value) for value in zip(*[prior_values,values])]
+                    else:
+                        count_sum_array = values
+                    combinedGeneExpression[gene] = count_sum_array
+
+    input_file = input_dir+'/test.txt'
+    export_object = open(input_file,'w')
+    export_object.write(string.join(['UID']+samples,'\t')+'\n')
+    for gene in combinedGeneExpression:
+        values = string.join(map(str,[gene]+combinedGeneExpression[gene]),'\t')
+        export_object.write(values+'\n')
+    export_object.close()
+
 if __name__ == '__main__':
     ################  Comand-line arguments ################
+    #statisticallyFilterFile('a','b',1)
     import getopt
     filter_rows=False
+    filter_file=None
     if len(sys.argv[1:])<=1:  ### Indicates that there are insufficient number of command-line arguments
         filter_names = ['bob','sally','jim']
         input_file = makeTestFile()
@@ -85,8 +192,10 @@ if __name__ == '__main__':
             elif opt == '--f': filter_file=arg
             elif opt == '--r': filter_rows=True
             
-    output_file = input_file[:-4]+'-output.txt'
-    if filter_rows:
+    output_file = input_file[:-4]+'-filtered.txt'
+    if filter_file ==None:
+        combineDropSeq(input_file)
+    elif filter_rows:
         filterRows(input_file,output_file)
     else:
         filter_names = getFilters(filter_file)

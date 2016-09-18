@@ -101,10 +101,11 @@ def expressedIndexes(values):
 
 def advancedPearsonCorrelationAnalysis(uid,data_list1,tissue_template_db):
     expIndexes = expressedIndexes(data_list1)
-    if (float(len(expIndexes))/len(data_list1))>0.1: ### Atleast 50% of samples evaluated express the gene
+    Queried[uid]=[]
+    if (float(len(expIndexes))/len(data_list1))>0.0: ### Atleast 50% of samples evaluated express the gene
         data_list = map(lambda i: data_list1[i],expIndexes) ### Only expressed values (non-None)
         max_diff = max(data_list)-statistics.avg(data_list)
-        if max_diff>0.4 and max(data_list)>-1:
+        if max_diff>-1000 and max(data_list)>-1000:
             if correlateAllGenes:
                 min_rho = -1
             else:
@@ -115,13 +116,15 @@ def advancedPearsonCorrelationAnalysis(uid,data_list1,tissue_template_db):
                 filtered_template = map(lambda i: tissue_template[i],expIndexes)
                 c2 = filtered_template.count(1)
                 if len(data_list)!= len(filtered_template): kill
-                if c1 == c2: ### If number of 1's in list1 matches list2
+                if c1 == c2 or c1 != c2: ### If number of 1's in list1 matches list2
                     rho = rhoCalculation(data_list,filtered_template)
                     if tissue == 'Housekeeping':
                         print tissue, rho, uid;sys.exit()
                     if rho>min_rho:
+                        Added[uid]=[]
                         try: tissue_scores[tissue].append([rho,uid])
                         except Exception: tissue_scores[tissue] = [[rho,uid]]
+
 
 def PearsonCorrelationAnalysis(uid,data_list1,tissue_template_db):
     if correlateAllGenes:
@@ -313,6 +316,7 @@ def reorderInputFile(custom_path,marker_list,marker_condition_db):
     exp_db={}
     probeset_symbol_db={}
     #print custom_path;sys.exit()
+    #print fn
     for line in open(fn,'rU').xreadlines():
         data = cleanUpLine(line)
         t = string.split(data,'\t')
@@ -330,13 +334,19 @@ def reorderInputFile(custom_path,marker_list,marker_condition_db):
     export_obj.write(header)
     for uid in marker_list:
         condition = marker_condition_db[uid]
-        try: export_obj.write(condition+':'+exp_db[uid])
-        except Exception:
-            print [uid]
+        new_uid = condition+':'+uid
+        if uid in exp_db:
+            export_obj.write(condition+':'+exp_db[uid])
+        elif new_uid in exp_db:
+            export_obj.write(exp_db[new_uid])
+        else:
+            """
+            print [uid], len(exp_db)
             for i in exp_db:
                 print [i];break
-            
             print 'Error encountered with the ID:',uid, 'not in exp_db'; kill
+            """
+            pass
     export_obj.close()
     
 def getOrderedGroups(filename):
@@ -354,20 +364,41 @@ def getOrderedGroups(filename):
     group_list.reverse()
     return group_list
         
-def generateMarkerHeatMaps(fl,platform,convertNonLogToLog=False,graphics=[]):
+def generateMarkerHeatMaps(fl,platform,convertNonLogToLog=False,graphics=[],Species=None):
     import clustering
     """ From the generated marker sets, output the replicate input data """
     marker_root_dir = fl.OutputDir()+'/'+'ExpressionOutput/MarkerFinder'
+    #print 1,fl.DatasetFile()
+    #print 2, fl.Vendor()
     for marker_dir in read_directory(marker_root_dir):
         if 'MarkerGenes' in marker_dir and 'correlation' in marker_dir:
             marker_dir = marker_root_dir+'/'+marker_dir
             marker_list, probeset_symbol_db, marker_condition_db = importMarkerProfiles(marker_dir,fl)
             custom_path = string.replace(marker_dir,'MarkerGenes','Clustering/MarkerGenes')
+            """
+            print fl.DatasetFile()
+            print len(marker_list), marker_list[:3]
+            print len(probeset_symbol_db)
+            print custom_path
+            print convertNonLogToLog
+            """
             ExpressionBuilder.exportGeometricFolds(fl.DatasetFile(),platform,marker_list,probeset_symbol_db,exportOutliers=False,exportRelative=False,customPath=custom_path,convertNonLogToLog=convertNonLogToLog)
             reorderInputFile(custom_path,marker_list, marker_condition_db)
             row_method = None; row_metric = 'cosine'; column_method = None; column_metric = 'euclidean'; color_gradient = 'yellow_black_blue'; transpose = False
+            import UI
+            gsp = UI.GeneSelectionParameters(Species,platform,fl.Vendor())
+            gsp.setPathwaySelect('None Selected')
+            gsp.setGeneSelection('')
+            gsp.setOntologyID('')
+            gsp.setGeneSet('None Selected')
+            gsp.setJustShowTheseIDs('')                
+            gsp.setTranspose(False)
+            gsp.setNormalize('median')
+            gsp.setGeneSelection('')
+            gsp.setClusterGOElite('GeneOntology')
+
             try:
-                graphics = clustering.runHCexplicit(custom_path, graphics, row_method, row_metric, column_method, column_metric, color_gradient, transpose, display=False, Normalize=True)
+                graphics = clustering.runHCexplicit(custom_path, graphics, row_method, row_metric, column_method, column_metric, color_gradient, gsp, display=False)
             except Exception:
                 print traceback.format_exc()
                 print 'Error occured in generated MarkerGene clusters... see ExpressionOutput/MarkerFinder files.'
@@ -405,7 +436,16 @@ def analyzeData(filename,Species,Platform,codingType,geneToReport=60,correlateAl
     global correlateAllGenes; correlateAllGenes = correlateAll
     global all_genes_ranked; all_genes_ranked={}
     global RPKM_threshold; global correlationDirection
-
+    global Added; Added={}; global Queried; Queried={}
+    
+    """
+    print 4,Platform, codingType, geneToReport, correlateAll, logTransform,
+    try:
+        #print AdditionalParameters.CorrelationDirection()
+        print AdditionalParameters.RPKMThreshold()
+    except Exception:
+        print 'nope'
+    """
     global AvgExpDir
     if len(filename) == 2:
         filename, AvgExpDir = filename  #### Used when there are replicate samples: avg_exp_dir is non-replicate
@@ -419,11 +459,15 @@ def analyzeData(filename,Species,Platform,codingType,geneToReport=60,correlateAl
         use_replicates = True
     
     import RNASeq
-    Platform = RNASeq.checkExpressionFileFormat(filename,Platform)
+    try: Platform = RNASeq.checkExpressionFileFormat(filename,Platform)
+    except Exception: Platform = "3'array"
 
+    try: RPKM_threshold = AdditionalParameters.RPKMThreshold() ### Used for exclusion of non-expressed genes
+    except Exception:
+        pass
     if Platform == 'RNASeq':
         try: RPKM_threshold = AdditionalParameters.RPKMThreshold() ### Used for exclusion of non-expressed genes
-        except Exception: RPKM_threshold = 3; logTransform = True
+        except Exception: RPKM_threshold = 1; logTransform = True
 
     correlationDirection = 1.00 ### Correlate to a positive or negative idealized pattern
     try:
@@ -730,6 +774,7 @@ def identifyMarkers(filename,cluster_comps):
                 if 'protein_coding' not in coding_class and 'pseudogene' not in coding_class and len(description)>0:
                     if 'MT-' not in symbol and '.' not in symbol:
                         proceed = 'yes'
+            proceed = 'yes' ### Force it to anlayze all genes
             count+=1
             #if coding_class != 'protein_coding':
             #print coding_class, coding_type, proceed, probeset, symbol, species, len(gene_to_symbol),coding_db[probeset];sys.exit()
@@ -771,7 +816,8 @@ def identifyMarkers(filename,cluster_comps):
                     #print print_limit,'genes analyzed'
                     print '*',
                     print_limit+=print_interval
-    #print len(tissue_scores),count
+    
+    #print len(Added),len(Queried),len(tissue_scores),count;sys.exit()
     tissue_specific_IDs={}; interim_correlations={}
 
     for tissue in tissue_scores:
@@ -1940,7 +1986,7 @@ def importAndAverageExport(expr_input,platform,annotationDB=None,annotationHeade
 
 if __name__ == '__main__':
     Species='Mm'
-    filename = ('/Users/saljh8/Desktop/Dan_TRAF6/temp/ExpressionInput/exp.test-steady-state.txt','/Users/saljh8/Desktop/Dan_TRAF6/temp/ExpressionOutput/AVERAGE-test.txt')
+    filename = ('/Users/saljh8/Desktop/Grimes/Kallisto/ExpressionInput/exp.kallisto.txt','/Users/saljh8/Desktop/Grimes/Kallisto/ExpressionOutput/AVERAGE-kallisto.txt')
     analyzeData(filename,Species,"RNASeq","protein_coding",geneToReport=60,correlateAll=True,AdditionalParameters=None,logTransform=True)
     sys.exit()
     averageNIValues('/Users/saljh8/Desktop/LineageProfiler/AltResults/RawSpliceData/Hs/splicing-index/meta-average.txt','/Users/saljh8/Desktop/LineageProfiler/ExpressionInput/stats.meta-steady-state.txt',{});sys.exit()
