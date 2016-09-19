@@ -1,7 +1,0 @@
-
-*.zip
-.gitignore
-*.pyc
-AltDataBase/
-mpmath/*.pyc
-
