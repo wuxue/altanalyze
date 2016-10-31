@@ -288,7 +288,7 @@ def getColoredPathway(root_dir,graphID_db,file_type,dataset_name,WPID=None):
             #print len(hex_color_list),hex_color_list
             #print file_type
             if len(graphID_list)==0:
-                force_no_matching_error
+                continue
             ### revision = 0 is the most current version
             #file = client.service.getColoredPathway(pwId=wpid,revision=0,graphId=graphID_list,color=hex_color_list,fileType=file_type)
 
@@ -415,5 +415,3 @@ if __name__ == '__main__':
     pathway_db = getAllSpeciesPathways('Homo sapiens')
     for i in pathway_db:
         print i, pathway_db[i].WPName(), len(pathway_db)
-        
-
